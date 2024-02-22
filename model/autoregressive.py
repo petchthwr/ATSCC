@@ -70,7 +70,7 @@ class Expansion(nn.Module):
         return x
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, input_size, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1, encoding_size=15, device='cuda'):
+    def __init__(self, input_size, d_model, nhead, num_layers, dim_feedforward=512, dropout=0.1, encoding_size=15, device='cuda:1'):
         super(TransformerEncoder, self).__init__()
 
         self.d_model = d_model
@@ -95,7 +95,7 @@ class TransformerEncoder(nn.Module):
     def forward(self, x):
         x = self.projection(x) # Expanding the input to the desired dimension
         cls_tokens = self.cls_token.repeat(x.shape[0], 1, 1)  # Adding the token to the beginning of every sequence in the batch, Shape: (N, E, 1)
-        x = torch.cat([cls_tokens, x], dim=2).to(self.device)  # Shape: (N, E, S+1)
+        x = torch.cat([cls_tokens, x], dim=2) # Shape: (N, E, S+1)
         x = x.permute(2, 0, 1)  # Permuted to (S+1, N, E)
         x = x + self.pos_encoder(torch.arange(x.size(0)).to(self.device)).unsqueeze(1)  # Apply positional encoding
         encodings = self.encoder(x) # Apply the transformer encoder

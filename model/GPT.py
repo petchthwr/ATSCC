@@ -93,13 +93,15 @@ class TransfomerCausalEncoderLayer(nn.Module):
         self.ff = PositionWiseFeedForward(embed_dim, hidden_dim, dropout=dropout)
         self.attn_norm = nn.LayerNorm(embed_dim)
         self.ff_norm = nn.LayerNorm(embed_dim)
+        self.post_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x, pad_mask, causal_mask):
-        x = x + self.attn(x, x, x, pad_mask, causal_mask)
-        x = self.attn_norm(x)
 
-        x = x + self.ff(x)
+        x = self.attn_norm(x)
+        x = x + self.attn(x, x, x, pad_mask, causal_mask)
+
         x = self.ff_norm(x)
+        x = x + self.ff(x)
 
         return x
 
@@ -124,8 +126,24 @@ class SinusoidalPositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1)]
         return x
 
+class LearnablePositionalEncoding(nn.Module):
+    def __init__(self, embed_dim, max_length=1000):
+        super().__init__()
+
+        # Model Configurations
+        self.embed_dim = embed_dim
+        self.max_length = max_length
+
+        # Model Layers
+        self.pe = nn.Parameter(torch.empty(max_length, embed_dim))  # Initialize an empty tensor
+        nn.init.uniform_(self.pe, -0.02, 0.02)  # Fill it with values uniformly sampled from [-0.02, 0.02]
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(1)]
+        return x
+
 class TSGPTEncoder(nn.Module):
-    def __init__(self, input_dims, output_dims, embed_dim, num_heads, num_layers, hidden_dim, dropout=0.0, max_length=1000):
+    def __init__(self, input_dims, output_dims, embed_dim, num_heads, num_layers, hidden_dim, dropout=0.0, max_length=1500):
         super().__init__()
 
         # Model Configurations
@@ -140,7 +158,7 @@ class TSGPTEncoder(nn.Module):
 
         # Model Layers
         self.pre_proj = nn.Linear(input_dims, embed_dim)
-        self.positional_embedding = SinusoidalPositionalEncoding(embed_dim, max_length)
+        #self.positional_embedding = LearnablePositionalEncoding(embed_dim, max_length)
         self.layers = nn.ModuleList([
             TransfomerCausalEncoderLayer(embed_dim, num_heads, hidden_dim, dropout=dropout)
             for _ in range(num_layers)
@@ -155,13 +173,15 @@ class TSGPTEncoder(nn.Module):
         return torch.isnan(x).any(dim=-1)
 
     def forward(self, x):
+
+        # Generate masks
         pad_mask = self.generate_pad_mask(x)
         causal_mask = self.generate_causal_mask(x)
 
         x[pad_mask] = 0
 
         x = self.pre_proj(x)
-        x = self.positional_embedding(x)
+        x = F.normalize(x, p=2, dim=-1)
 
         for layer in self.layers:
             x = layer(x, pad_mask, causal_mask)
@@ -170,5 +190,4 @@ class TSGPTEncoder(nn.Module):
         x = F.normalize(x, p=2, dim=-1)
 
         x[pad_mask] = float('nan')
-
         return x

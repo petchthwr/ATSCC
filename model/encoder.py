@@ -93,6 +93,7 @@ class TSEncoder(nn.Module):
                 x = layer(x)
                 outputs.append(x.transpose(1, 2))
 
+
             # Masking NAN back
             for i in range(len(outputs)):
                 outputs[i][~nan_mask] = float('nan')

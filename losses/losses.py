@@ -268,13 +268,12 @@ def hierarchical_snnl(z1, z2, loc_label1, loc_label2, alpha=0.5, temperature=10.
 
 def soft_nearest_neighbor_loss(x, y, T):
 
-    x = F.normalize(x, dim=1) # Normalize for cosine similarity
     sim = torch.mm(x, x.t()) / T # Calculate the similarity matrix and scale by temperature
     sim.fill_diagonal_(0) # Remove self-similarity
-    masks = torch.eq(y[:, None], y[None, :]).float() # Create a mask for instances with the same label
+    masks = torch.eq(y[:, None], y[None, :]).bool() # Create a mask for instances with the same label
 
     numerator = torch.logsumexp(sim * masks, dim=1)
-    denominator = torch.logsumexp(sim, dim=1)
+    denominator = torch.logsumexp(sim * ~masks, dim=1) #* ~masks
     loss = torch.mean(denominator - numerator)
 
     return loss
@@ -320,7 +319,6 @@ def soft_nearest_neighbor_gaussian_loss(x, y, T, min2sigma=20.0):
     loss = torch.mean(denominator - numerator)
 
     return loss
-
 
 def batch_soft_nearest_neighbor_loss(out1, proc_label, temperature=100.0):
     local_loss = []
@@ -374,24 +372,6 @@ def layer_wise_snnl(z, proc_label, temperature=100.0, portion=0.2):
     z = [z_i[idx] for z_i, idx in zip(z, indices)]
 
     return sum([soft_nearest_neighbor_loss(z_i, proc_label[idx], temperature) for z_i, idx in zip(z, indices)]) / len(z)
-
-"""
-def layer_wise_snnl(z, proc_label, temperature=100.0, portion=0.2):
-    valid_indices = ~proc_label.flatten().isnan()
-    proc_label = flatten_local_label(proc_label)
-
-    snnl = 0
-    for z_i in z:
-        valid_z_i = z_i.reshape(-1, z_i.shape[-1])[valid_indices]
-        idx = torch.randperm(valid_z_i.size(0))[:int(valid_z_i.size(0) * portion)]
-        sampled_z_i = valid_z_i[idx]
-        sampled_labels = proc_label[idx]
-        snnl += soft_nearest_neighbor_loss(sampled_z_i, sampled_labels, temperature)
-        del valid_z_i, idx, sampled_z_i, sampled_labels
-        gc.collect()
-
-    snnl /= len(z)
-    return snnl"""
 
 def soft_gaussian_neighborhood_loss(z, proc_label, temperature=100.0):
 
