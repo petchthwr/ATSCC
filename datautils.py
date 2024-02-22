@@ -14,6 +14,44 @@ from sklearn.preprocessing import LabelEncoder
 from losses.utils import find_split_indices
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+def data_scaling(x_train, scaler='standard'):
+    if scaler == 'standard':
+        scaler = StandardScaler()
+        x_train = scaler.fit_transform(x_train.reshape(-1, x_train.shape[-1])).reshape(x_train.shape)
+    elif scaler == 'minmax':
+        scaler = MinMaxScaler()
+        x_train = scaler.fit_transform(x_train.reshape(-1, x_train.shape[-1])).reshape(x_train.shape)
+    return x_train, scaler
+
+def get_directional_vec(data):
+
+    data = data.transpose(0, 2, 1)
+
+    # Calculate velocity as difference between successive time steps
+    vel = np.diff(data, axis=-1)
+    vel = np.concatenate([vel, vel[:, :, -1:]], axis=-1)
+
+    # Normalize the velocity vectors
+    vel_norm = np.linalg.norm(vel, axis=1, keepdims=True)
+    vel_norm = np.where(vel_norm > 1e-9, vel_norm, 1e-9)  # Avoid division by zero
+    directional_vec = vel / vel_norm  # Normalized velocity
+
+    return directional_vec.transpose(0, 2, 1)
+
+def get_polar(data):
+    data = data.transpose(0, 2, 1)
+
+    # Calculate r and theta from x, y
+    r = np.linalg.norm(data[:, :2, :], axis=1, keepdims=True)
+    theta = np.arctan2(data[:, :1, :], data[:, 1:2, :]) # arctan(y/x)
+
+    sin = np.sin(theta)
+    cos = np.cos(theta)
+
+    polar = np.concatenate([r, sin, cos], axis=1)
+    return polar.transpose(0, 2, 1)
 
 def load_ATFM_data(path, split_point='auto', downsample=2, size_lim=None):
 
@@ -26,9 +64,9 @@ def load_ATFM_data(path, split_point='auto', downsample=2, size_lim=None):
         x_test = np.transpose(x_test, (0, 2, 1))
 
     # If data path has ESSA in it, apply Savitzky-Golay filter
-    if 'ESSA' in path:
-        x_train = savgol_filter_data(x_train, window_length=21, polyorder=1)
-        x_test = savgol_filter_data(x_test, window_length=21, polyorder=1)
+    #if 'ESSA' in path:
+    #    x_train = savgol_filter_data(x_train, window_length=21, polyorder=1)
+    #    x_test = savgol_filter_data(x_test, window_length=21, polyorder=1)
 
     # Load labels if they exist
     if not os.path.exists(os.path.join(path, 'y_train.pkl')) or not os.path.exists(os.path.join(path, 'y_test.pkl')):
@@ -65,74 +103,68 @@ def load_ATFM_data(path, split_point='auto', downsample=2, size_lim=None):
 
 
 class ATPCCDataset(data.Dataset):
-    def __init__(self, x, y=None, epsilon=0.05, eval=True, device='cuda', precomputed_rdp=None, polar=False, direction=False):
+    def __init__(self, x, y=None, epsilon=0.05, eval=True, device='cuda', precomputed_rdp=None, polar=False, direction=False, fitted_scaler=None):
         super(ATPCCDataset, self).__init__()
         self.time_series = x
         self.device = device
-        self.epsilon = epsilon
         self.eval = eval
-        self.Resize = tsaug.Resize(size=100)
+        train_flag = 'train' if not eval else 'test'
         self.label = y
+        self.epsilon = epsilon
+        self.polar = polar
+        self.direction = direction
+        self.resize = tsaug.Resize(size=100)
+        self.length_list = [x_i[~np.isnan(x_i).any(axis=1)].shape[0] for x_i in x]
 
+        # RDP precomputation
         if precomputed_rdp is None:
             print('RDP segmentation precomputing...', end=' ')
-            self.rdp = [self.get_procedural_label(x, epsilon=epsilon) for x in tqdm(self.time_series, desc='RDP precomputing', leave=True)]
+            self.rdp = [self.get_procedural_label(x, epsilon=epsilon) for x in tqdm(self.time_series, desc=f'RDP precomputing; {train_flag}', leave=True)]
         else:
             self.rdp = precomputed_rdp
 
-        self.polar = polar
-        self.direction = direction
+        # Feature precomputation
+        self.features = x
+        if direction:
+            directional_features = np.array([self.get_data_directional_vec(x_i) for x_i in self.features])
+            self.features = np.concatenate([self.features, directional_features], axis=-1)
+        if polar:
+            polar_features = np.array([self.get_data_polar(x_i) for x_i in self.features])
+            self.features = np.concatenate([self.features, polar_features], axis=-1)
+        self.time_series = self.features
+        
+        """if fitted_scaler is not None:
+            self.scaler = fitted_scaler
+            self.features = fitted_scaler.transform(self.features.reshape(-1, self.features.shape[-1])).reshape(self.features.shape)
+        else:
+            self.features, self.scaler = data_scaling(self.features, scaler='minmax')"""
+
+        self.scaler = fitted_scaler
+
         self.procedural_labels = [x[0] for x in self.rdp]
         self.rdp_mask = [x[1] for x in self.rdp]
-        self.point_reduced_time_series = [x[2] for x in self.rdp]
-        self.simplified_time_series = [x[3] for x in self.rdp]
 
     def __len__(self):
         return len(self.time_series)
 
     def __getitem__(self, i):
-        x = self.time_series[i]
+        x = self.features[i]
         x = x[~np.isnan(x).any(axis=1)]
         features = x
         proc_label = self.procedural_labels[i]
 
         if self.eval: # If not using augmentation, return the original time series
-
-            if self.direction:
-                u_features = self.get_directional_vec(features)
-                features = np.concatenate([features, u_features], axis=1)
-
-            if self.polar:
-                p_features = self.get_polar(features)
-                features = np.concatenate([features, p_features], axis=1)
-
             return features, self.procedural_labels[i], self.label[i] if self.label is not None else None
 
         # Our augmentation simplify
         aug1, proc_label1 = x, proc_label
-        aug2, proc_label2 = self.simplify(i)
+        return aug1, proc_label1
 
-        if self.direction:
-            u_aug1, u_aug2 = self.get_directional_vec(aug1), self.get_directional_vec(aug2)
-            aug1 = np.concatenate([aug1, u_aug1], axis=1)
-            aug2 = np.concatenate([aug2, u_aug2], axis=1)
-
-        if self.polar:
-            p_aug1, p_aug2 = self.get_polar(aug1), self.get_polar(aug2)
-            aug1 = np.concatenate([aug1, p_aug1], axis=1)
-            aug2 = np.concatenate([aug2, p_aug2], axis=1)
-
-        """# TS2Vec augmentation
-        if self.direction:
-            u_features = self.get_directional_vec(features)
-            features = np.concatenate([features, u_features], axis=1)
-        if self.polar:
-            p_features = self.get_polar(features)
-            features = np.concatenate([features, p_features], axis=1)
-        aug1, proc_label1 = self.crop(features, proc_label, keep_dim=True)
-        aug2, proc_label2 = self.crop(features, proc_label, keep_dim=True)"""
-
-        return aug1, aug2, proc_label1, proc_label2
+        #size = np.random.choice(self.length_list)
+        #self.resize.size = int(size)
+        #aug2 = self.resize.augment(aug1)
+        #proc_label2 = np.round(self.resize.augment(proc_label1))
+        #return aug1, aug2, proc_label1, proc_label2
 
     def get_procedural_label(self, sample, epsilon=0.05, num_split=25):
         # Input shape of sample: (T, 3)
@@ -143,19 +175,7 @@ class ATPCCDataset(data.Dataset):
         partition_labels = np.cumsum(mask.astype(float))
         partition_labels[-1] = partition_labels[-2]
 
-        # Create NaN like sample
-        simplified_sample = sample.copy()
-        simplified_sample[~mask] = float('nan') # Replace non-partition points with NaN
-
-        # Interpolate to fill NaNs
-        for i in range(simplified_sample.shape[1]):
-            f = interp1d(np.arange(simplified_sample.shape[0])[~np.isnan(simplified_sample[:, i])], simplified_sample[~np.isnan(simplified_sample[:, i]), i])
-            simplified_sample[:, i] = f(np.arange(simplified_sample.shape[0]))
-
-        point_reduced_sample = sample.copy()
-        point_reduced_sample[~mask] = float('nan')
-
-        return partition_labels, mask, point_reduced_sample, simplified_sample
+        return partition_labels, mask
 
     def get_velocity(self, x):
         vel = np.diff(x, axis=0)
@@ -176,69 +196,54 @@ class ATPCCDataset(data.Dataset):
 
         sin_theta = np.sin(theta)
         cos_theta = np.cos(theta)
-
         #theta = (theta + np.pi) / (2 * np.pi)
 
-        return np.concatenate([r, sin_theta, cos_theta], axis=1)
+        polar = np.concatenate([r, sin_theta, cos_theta], axis=1)
 
-    def crop(self, x, proc_label, keep_dim=True):
-        # Assuming x is a numpy array of shape [T, Ch]
-        ts = x
-        cropped_ts = ts.copy()
-        cropped_proc_label = proc_label.copy()
-        seq_len = x.shape[0]
-        crop_l = np.random.randint(low=2, high=seq_len + 1)
-        start = np.random.randint(seq_len - crop_l + 1)
-        end = start + crop_l
-        start = max(0, start)
-        end = min(end, seq_len)
+        return polar
 
-        if keep_dim:
-            cropped_ts[:start, :] = float('nan')
-            cropped_ts[end:, :] = float('nan')
-        else:
-            cropped_ts = cropped_ts[start:end, :]
-            cropped_proc_label = cropped_proc_label[start:end]
+    def get_data_directional_vec(self, x):
+        original_shape = x.shape
+        x = x[~np.isnan(x).any(axis=1)]
+        u = self.get_directional_vec(x)
+        u = np.pad(u, ((0, original_shape[0] - u.shape[0]), (0, 0)), mode='constant', constant_values=float('nan'))
+        return u
 
-        return cropped_ts, cropped_proc_label
-
-    def simplify(self, ind):
-        return self.simplified_time_series[ind], self.procedural_labels[ind]
-
-    def point_reduce(self, ind):
-        reduced_proc_label = self.procedural_labels[ind].copy()
-        mask = self.rdp_mask[ind]
-        reduced_proc_label[~mask] = float('nan')
-        return self.point_reduced_time_series[ind], reduced_proc_label
+    def get_data_polar(self, x):
+        original_shape = x.shape
+        x = x[~np.isnan(x).any(axis=1)]
+        p = self.get_polar(x)
+        p = np.pad(p, ((0, original_shape[0] - p.shape[0]), (0, 0)), mode='constant', constant_values=float('nan'))
+        return p
 
 def pad_stack_train(batch):
 
-    aug1, aug2, proc_label1, proc_label2 = zip(*batch)
+    aug1, proc_label1 = zip(*batch)
+    #aug1, aug2, proc_label1, proc_label2 = zip(*batch)
+
     aug1 = [torch.tensor(t, dtype=torch.float32) for t in aug1]
-    aug2 = [torch.tensor(t, dtype=torch.float32) for t in aug2]
     proc_label1 = [torch.tensor(t, dtype=torch.float32) for t in proc_label1]
-    proc_label2 = [torch.tensor(t, dtype=torch.float32) for t in proc_label2]
     max_aug1_length = max(t.size(0) for t in aug1)
-    max_aug2_length = max(t.size(0) for t in aug2)
     max_label1_length = max(t.size(0) for t in proc_label1)
-    max_label2_length = max(t.size(0) for t in proc_label2)
     assert max_aug1_length == max_label1_length, 'Max lengths are not equal!'
-    assert max_aug2_length == max_label2_length, 'Max lengths are not equal!'
-    max_length = max(max_aug1_length, max_aug2_length)
 
-    # Pad according to max length on the right
-    aug1_padded = [F.pad(input=t, pad=(0, 0, max_length - t.size(0), 0), mode='constant', value=float('nan')) for t in aug1]
-    aug2_padded = [F.pad(input=t, pad=(0, 0, max_length - t.size(0), 0), mode='constant', value=float('nan')) for t in aug2]
-    proc_label1_padded = [F.pad(input=t, pad=(max_length - t.size(0), 0), mode='constant', value=float('nan')) for t in proc_label1]
-    proc_label2_padded = [F.pad(input=t, pad=(max_length - t.size(0), 0), mode='constant', value=float('nan')) for t in proc_label2]
+    #aug2 = [torch.tensor(t, dtype=torch.float32) for t in aug2]
+    #proc_label2 = [torch.tensor(t, dtype=torch.float32) for t in proc_label2]
+    #max_aug2_length = max(t.size(0) for t in aug2)
+    #max_label2_length = max(t.size(0) for t in proc_label2)
+    #assert max_aug2_length == max_label2_length, 'Max lengths are not equal!'
 
-    # Pad according to max length on the left
-    #aug1_padded = [F.pad(input=t, pad=(0, 0, 0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in aug1]
+    #max_length = max(max_aug1_length, max_aug2_length)
+
+    max_length = max_aug1_length
+    aug1_padded = [F.pad(input=t, pad=(0, 0, 0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in aug1]
+    proc_label1_padded = [F.pad(input=t, pad=(0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in proc_label1]
     #aug2_padded = [F.pad(input=t, pad=(0, 0, 0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in aug2]
-    #proc_label1_padded = [F.pad(input=t, pad=(0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in proc_label1]
     #proc_label2_padded = [F.pad(input=t, pad=(0, max_length - t.size(0)), mode='constant', value=float('nan')) for t in proc_label2]
+    #return torch.stack(aug1_padded), torch.stack(aug2_padded), torch.stack(proc_label1_padded), torch.stack(proc_label2_padded)
 
-    return torch.stack(aug1_padded), torch.stack(aug2_padded), torch.stack(proc_label1_padded), torch.stack(proc_label2_padded)
+    return torch.stack(aug1_padded), torch.stack(proc_label1_padded)
+
 
 def pad_stack_test(batch):
 
@@ -249,27 +254,13 @@ def pad_stack_test(batch):
     max_label_length = max(t.size(0) for t in proc_label)
     assert max_x_length == max_label_length, 'Max lengths are not equal!'
 
-    # Pad according to max length
-    x_padded = [F.pad(input=t, pad=(0, 0, max_x_length - t.size(0), 0), mode='constant', value=float('nan')) for t in x]
-    proc_label_padded = [F.pad(input=t, pad=(max_label_length - t.size(0), 0), mode='constant', value=float('nan')) for t in proc_label]
-
-    # Pad according to max length on the left
-    #x_padded = [F.pad(input=t, pad=(0, 0, 0, max_x_length - t.size(0)), mode='constant', value=float('nan')) for t in x]
-    #proc_label_padded = [F.pad(input=t, pad=(0, max_label_length - t.size(0)), mode='constant', value=float('nan')) for t in proc_label]
+    x_padded = [F.pad(input=t, pad=(0, 0, 0, max_x_length - t.size(0)), mode='constant', value=float('nan')) for t in x] # Pad bottom
+    proc_label_padded = [F.pad(input=t, pad=(0, max_label_length - t.size(0)), mode='constant', value=float('nan')) for t in proc_label] # Pad right
 
     if label[0] is None:
         return torch.stack(x_padded), torch.stack(proc_label_padded), None
 
     return torch.stack(x_padded), torch.stack(proc_label_padded), torch.tensor(label, dtype=torch.long)
-
-def centerize_vary_length_series(x):
-    prefix_zeros = np.argmax(~np.isnan(x).all(axis=-1), axis=1)
-    suffix_zeros = np.argmax(~np.isnan(x[:, ::-1]).all(axis=-1), axis=1)
-    offset = (prefix_zeros + suffix_zeros) // 2 - prefix_zeros
-    rows, column_indices = np.ogrid[:x.shape[0], :x.shape[1]]
-    offset[offset < 0] += x.shape[1]
-    column_indices = column_indices - offset[:, np.newaxis]
-    return x[rows, column_indices]
 
 
 def savgol_filter_data(data, window_length, polyorder):

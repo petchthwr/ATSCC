@@ -1,381 +1,73 @@
-import numpy as np
-import torch
-import matplotlib
-import matplotlib.pyplot as plt
-from datautils import *
-from plotutils import *
-from model.encoder import TSEncoder
-from model.autoregressive import TransformerTSEncoder
-from model.GPT import TSGPTEncoder
-from losses.losses import *
-from losses.snnl import *
-from umap import UMAP
-import tasks
-from sklearn import cluster
-from sklearn import metrics
-from pathlib import Path
-from dtaidistance import dtw_ndim as dtw
-import warnings
-import pickle
-import time
-warnings.filterwarnings("ignore", category=FutureWarning)
+from atscc import *
+import wandb
 
-def reproducibility(seed=42):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
+# Variable for wandb logging
+wandb.login(key='dd48a2fe503f34d4c795ab3877f4fb93132843e1')
+dataset = ['RKSIa_v']
 
-def load_data(datapath, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False):
+split_point = 0.5
+polar = True
+direction = True
 
-    x_train, x_test, y_train, y_test = load_ATFM_data(datapath, split_point, downsample=downsample, size_lim=size_lim)
-
-    train_dataset = ATPCCDataset(x_train, y_train, rdp_epsilon, False, device, direction=direction, polar=polar)
-    test_dataset = ATPCCDataset(x_test, y_test, rdp_epsilon, True, device, direction=direction, polar=polar)
-
-    train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=pad_stack_train, pin_memory=True, num_workers=4)
-    test_loader = data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=pad_stack_test, pin_memory=True, num_workers=4)
-
-    return train_loader, test_loader
-
-
-def encode(model, loader, device, pooling='last'):
-
-    org_training = model.training
-    model.eval()
-    loader.dataset.eval = True
-
-    with torch.no_grad():
-        output, traj, full_encode = [], [], []
-        split_ind = []
-        for batch, proc_label, _ in loader:
-
-            x = batch.to(device)
-            traj.append(x.cpu().numpy())
-            out = model(x)[-1] if isinstance(model(x), list) else model(x)
-
-            full_encoding = out
-            full_encode.append(full_encoding.cpu().numpy())
-            if pooling == 'max':
-                cls = F.max_pool1d(out.transpose(1, 2).contiguous(), kernel_size=out.size(1)).transpose(1, 2)
-                cls = torch.squeeze(cls)
-            elif pooling == 'last':
-                cls = out[:, -1, :]
-            elif pooling == 'first':
-                cls = out[:, 0, :]
-            elif pooling == 'mean':
-                cls = torch.mean(out, dim=1)
-            output.append(cls)
-            split_ind.extend([find_split_indices(label) for label in proc_label])
-
-        max_T = max([t.shape[1] for t in traj])
-        #traj = np.vstack([np.pad(t, ((0, 0), (0, max_T - t.shape[1]), (0, 0)), 'constant', constant_values=np.nan) for t in traj])
-        #full_encode = np.vstack([np.pad(t, ((0, 0), (0, max_T - t.shape[1]), (0, 0)), 'constant', constant_values=np.nan) for t in full_encode])
-        traj = np.vstack([np.pad(t, ((0, 0), (max_T - t.shape[1], 0), (0, 0)), 'constant', constant_values=np.nan) for t in traj])
-        full_encode = np.vstack([np.pad(t, ((0, 0), (max_T - t.shape[1], 0), (0, 0)), 'constant', constant_values=np.nan) for t in full_encode])
-        output = torch.cat(output, dim=0)
-
-    model.train(org_training)
-
-    return output.cpu().numpy(), traj, full_encode, split_ind
-
-
-def get_loader_label(loader):
-    labels = []
-    for _, _, label in loader:
-
-        # if label is none exit loop and return none
-        if label is None:
-            return None
-
-        labels.append(label)
-    return torch.cat(labels, dim=0).cpu().numpy()
-
-
-def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, pooling='last', eval_method='clustering', final=False):
-    ori_train_loader_eval = train_loader.dataset.eval
-    ori_train_collate_fn = train_loader.collate_fn
-    train_loader.dataset.eval = True
-    train_loader.collate_fn = pad_stack_test
-
-    train_repr, train_traj, train_full_encode, split_ind_train = encode(Encoder, train_loader, device)
-    train_label = get_loader_label(train_loader)
-
-    test_repr, test_traj, test_full_encode, split_ind_test = encode(Encoder, test_loader, device, pooling=pooling)
-    test_label = get_loader_label(test_loader)
-
-    # Export test representations as pickle
-    Path(f'figures/{datapath}/test_repr').mkdir(parents=True, exist_ok=True)
-    with open(f'figures/{datapath}/test_repr/test_repr_epoch_{epoch}.pkl', 'wb') as f:
-        pickle.dump(test_repr, f)
-
-    if test_label is not None:
-        index_to_sample = range(len(test_full_encode))[::10]
-        index_to_sample = sorted(index_to_sample, key=lambda x: test_label[x])
-    else:
-        index_to_sample = range(len(test_full_encode))[::10]
-
-    for i in index_to_sample:
-        visualize_encoding_ADSB(test_full_encode[i], test_traj[i], split_ind_test[i], datapath, i)
-
-    clus_model = cluster.KMeans(n_clusters=20)
-    umap = UMAP(n_components=2)
-
-    if eval_method == 'classification':
-        if test_label is None:
-            raise ValueError('Test labels are not provided')
-
-        out, eval_res = tasks.eval_classification(Encoder, train_repr, train_label, test_repr, test_label, eval_protocol='svm')
-        acc = eval_res['acc']
-        score = {'Accuracy': acc}
-
-    elif eval_method == 'clustering':
-        umap_result = umap.fit_transform(test_repr)
-        cluster_assignments = clus_model.fit_predict(test_repr)
-
-        # If path does not exist, create it
-        Path(f'figures/{datapath}/UMAP').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/trajectories').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/clustered').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/dendrogram').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/scores').mkdir(parents=True, exist_ok=True)
-
-        plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
-        plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
-        plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
-
-        if test_label is not None:
-            plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}.png')
-            nmi_score = metrics.normalized_mutual_info_score(test_label, cluster_assignments)
-            ari_score = metrics.adjusted_rand_score(test_label, cluster_assignments)
-            mi_score = metrics.mutual_info_score(test_label, cluster_assignments)
-            score = {'NMI': nmi_score, 'ARI': ari_score, 'MI': mi_score}
-        else:
-            silhouette_score = metrics.silhouette_score(test_repr, cluster_assignments)
-            davies_bouldin_score = metrics.davies_bouldin_score(test_repr, cluster_assignments)
-            score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}
-
-    else:
-        raise NotImplementedError
-
-    if final: # Compute dtw matrix for full encoding
-        dtw_matrix = dtw.distance_matrix_fast(test_full_encode.astype(np.double), parallel=True)
-        clus_model.affinity = 'precomputed'
-        clus_model.linkage = 'average'
-        umap.metric = 'precomputed'
-
-        if test_label is not None:
-            nmi_score, ari_score, mi_score, best_num_clusters_nmi, best_num_clusters_ari, best_num_clusters_mi = (
-                calculate_NMI_ARI(clus_model, dtw_matrix, Path(f'figures/{datapath}/scores') / f'scores_epoch_{epoch}_full.png', test_label))
-            score = {'NMI': nmi_score, 'ARI': ari_score, 'MI': mi_score, 'n*NMI': best_num_clusters_nmi, 'n*ARI': best_num_clusters_ari, 'n*MI': best_num_clusters_mi}
-            clus_model.n_clusters = best_num_clusters_mi
-            umap_result = umap.fit_transform(dtw_matrix)
-            cluster_assignments = clus_model.fit_predict(dtw_matrix)
-            plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}_full.png')
-            plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}_full.png')
-            plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}_full.png')
-            plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}_full.png')
-        else:
-            silhouette_score = metrics.silhouette_score(dtw_matrix, cluster_assignments)
-            davies_bouldin_score = metrics.davies_bouldin_score(dtw_matrix, cluster_assignments)
-            score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}
-
-    train_loader.dataset.eval = ori_train_loader_eval
-    train_loader.collate_fn = ori_train_collate_fn
-
-    return score
-
-
-def epoch_run(Encoder, loader, device, optim, alpha, beta, global_temp, local_temp, portion):
-    epoch_loss = 0.0
-    Encoder.train()
-    for aug1, aug2, proc_label1, _ in loader:
-
-        aug1 = aug1.to(device)
-        proc_label1 = proc_label1.to(device) #proc_label2 = proc_label2.to(device)
-        out1 = Encoder(aug1)
-
-        global_loss = 0.0
-        if alpha != 0:
-            aug2 = aug2.to(device)
-            out2 = Encoder(aug2)
-            global_infoNCE(out1, out2, pooling='last', temperature=global_temp) if not isinstance(out1, list) else (
-                global_infoNCE(out1[-1], out2[-1], pooling='last', temperature=global_temp))
-        else:
-            global_loss = 0.0
-
-        local_loss = flat_snnl(out1, proc_label1, temperature=local_temp, portion=portion) if not isinstance(out1, list) else (
-            layer_wise_snnl(out1, proc_label1, temperature=local_temp, portion=portion))
-
-        loss = alpha * global_loss + beta * local_loss
-        #loss = hierarchical_contrastive_loss(out1, out2)
-
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-
-        epoch_loss += loss.item()
-
-    epoch_loss = epoch_loss / len(train_loader)
-
-    return epoch_loss, Encoder
-
-
-def compute_sampling_loss(out, label, temperature, times_sampling, num_sampling, device):
-    # Pad the outputs and labels
-    max_length = max([o.size(1) for o in out])  # Find the maximum length
-    label = [torch.nn.functional.pad(p, (0, max_length - p.size(1)), mode='constant', value=float('nan')) for p in label]  # Pad each tensor
-    label = torch.concat(label, dim=0)
-    out = [torch.nn.functional.pad(o, (0, 0, max_length - o.size(1), 0), mode='constant', value=float('nan')) for o in out]  # Pad each tensor
-    out = torch.concat(out, dim=0)
-
-    # Rearrage to shape (B x T, C)
-    valid_indices = ~label.reshape(-1).isnan()
-    out = out.reshape(-1, out.size(-1))[valid_indices]
-    label = flatten_local_label(label)
-
-    loss = 0.0
-    ind = torch.randperm(out.size(0), device=device)[:times_sampling]
-    for i in ind:
-        # Find positive index by matching the label at index i
-        pos_indices = torch.where(label == label[i])[0]
-        pos_samples = out[pos_indices]
-        pos_labels = label[pos_indices]
-
-        # For negative indices
-        neg_indices = torch.where(label != label[i])[0]
-        neg_samples = out[neg_indices]
-        neg_labels = label[neg_indices]
-
-        # Random sampling for negatives
-        if neg_samples.size(0) > num_sampling:
-            neg_indices = torch.randperm(neg_samples.size(0), device=device)[:num_sampling]
-            neg_samples = neg_samples[neg_indices]
-            neg_labels = neg_labels[neg_indices]
-
-        out_i = torch.cat([pos_samples, neg_samples], dim=0)
-        label_i = torch.cat([pos_labels, neg_labels], dim=0)
-
-        snnl = soft_nearest_neighbor_loss(out_i, label_i, temperature)
-        loss += snnl
-
-    loss /= len(ind)
-
-    return loss
-
-
-def rearrange_out(batch_by_layer):
-    """
-    Rearrange a list of lists from (num_batch * num_layer) to (num_layer * num_batch).
-
-    :param batch_by_layer: A list of lists where the outer list is num_batch and
-                           each inner list is num_layer.
-    :return: A list of lists where the outer list is num_layer and
-             each inner list is num_batch.
-    """
-    # The * operator is used to unpack the list, allowing zip to transpose it
-    layer_by_batch = list(zip(*batch_by_layer))
-    return [list(layer) for layer in layer_by_batch]
-
-
-def epoch_run_sampling(Encoder, loader, device, optim, temperature, num_sampling=5000, times_sampling=32):
-    Encoder.train()
-
-    out = []  # List to store the outputs
-    label = []  # List to store the processed labels
-
-    for aug1, _, proc_label1, _ in loader:
-
-        # Send to device
-        aug1 = aug1.to(device)
-        proc_label1 = proc_label1.to(device)
-
-        # Generate multiple samples
-        out1 = Encoder(aug1)
-
-        out.append(out1)
-        label.append(proc_label1)
-
-    del aug1, proc_label1
-    torch.cuda.empty_cache()
-
-    if isinstance(out[0], list):
-        out = rearrange_out(out)
-        loss = 0.0
-        for o in out:
-            loss += compute_sampling_loss(o, label, temperature, times_sampling, num_sampling, device)
-    else:
-        loss = compute_sampling_loss(out, label, temperature, times_sampling, num_sampling, device)
-
-    optim.zero_grad()
-    loss.backward()
-    optim.step()
-    epoch_loss = loss.item()
-
-    return epoch_loss, Encoder
-
-seed = 1
-reproducibility(seed)
-device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-
-# Data loader parameters
-datapath = 'data/ESSA/arrival'
-split_point = 'auto'
-rdp_epsilon = 0.0005
-batch_size = 64
-
-# Encoder parameters
 input_dims = 9
-output_dims = 64
-hidden_dims = 1024
-num_heads = 8
-embed_dims = 512
-num_layers = 10
+output_dims = 320
+num_layers = 12
+embed_dims = 768
+ffn_dims = 3072
+num_heads = 12
 
-# Optimizer parameters
-learning_rate = 1e-4
-num_epochs = 10
-eval_every = 2
-num_sampling = 6000
-times_sampling = 32
+num_epochs = 5
+eval_every = 5
 
-# Loss Parameters
-local_temp = 1.0
-dropout = 0.1
-
-# Load data
-train_loader, test_loader = load_data(datapath, split_point, downsample=4, size_lim=None,
-                                                             rdp_epsilon=rdp_epsilon, batch_size=batch_size,
-                                                             device=device, polar=True, direction=True)
-
-# Create model and optimizer
-Encoder = TSGPTEncoder(input_dims, output_dims, embed_dims, num_heads, num_layers, hidden_dims, dropout).to(device)
-#Encoder = TSEncoder(input_dims, output_dims, hidden_dims, num_layers, dropout=dropout, all_out=False).to(device)
-optim = torch.optim.Adam(Encoder.parameters(), lr=learning_rate, weight_decay=1e-5)
-
-# Pretrain Convolutional Layers
-for epoch in range(num_epochs):
-    st = time.time()
-    epoch_loss, Encoder = epoch_run(Encoder, train_loader, device, optim, alpha=0.0, beta=1.0, global_temp=1.0, local_temp=1.0, portion=1.0)
-    #epoch_loss, Encoder = epoch_run(Encoder, train_loader, device, optim, local_temp,num_sampling, times_sampling)
-    et = time.time()
-    if epoch % eval_every == 0 or epoch == num_epochs - 1:
-        epoch = epoch + 1 if epoch == num_epochs - 1 else epoch
-        if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
-            os.makedirs(os.path.join(f'ckpt/{datapath}'))
-        torch.save(Encoder.state_dict(), os.path.join(f'ckpt/{datapath}/encoder_epoch_{epoch}.pt'))
-        score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, pooling='last', eval_method='clustering')
-        score_str = ''
-        for key, val in score.items():
-            score_str += f'{key}: {val:.6f} '
-        print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} {score_str} Time elapsed: {et - st:.2f} seconds')
-    elif epoch % 10 == 0:
-        print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} Time elapsed: {et - st:.2f} seconds')
-
-score = evaluate(train_loader, test_loader, Encoder, device, num_epochs, datapath, pooling='last', eval_method='clustering', final=True)
-score_str = ''
-for key, val in score.items():
-    score_str += f'{key}: {val:.6f} '
-print(f'Epoch: {num_epochs} ==> Loss: {0:.6f} {score_str}')
+sweep_config = {'method': 'grid'}
+metric = {'name': 'NMI', 'goal': 'maximize'}
+sweep_config['metric'] = metric
+parameters_dict = {
+    'seed': {
+        'values': [0, 1, 2, 3, 4]
+        },
+    'rdp_epsilon': {
+        'values': [0.0001]
+        },
+    'batch_size': {
+        'values': [8]
+        },
+    'temperature': {
+        'values': [0.05]
+        },
+    'dropout': {
+        'values': [0.3]
+        },
+    'lr': {
+        'values': [1e-5]
+        }
+    }
+sweep_config['parameters'] = parameters_dict
 
 
+def run_sweep_for_dataset(dset_name, sweep_config):
+    sweep_id = wandb.sweep(sweep_config, project="ATSCC_" + dset_name)
+
+    def sweep(config=None):
+        with wandb.init(config=config):
+            config = wandb.config
+
+            reproducibility(config.seed)
+            train_loader, test_loader = load_data(dset_name, split_point, downsample=10, size_lim=5000, rdp_epsilon=config.rdp_epsilon, batch_size=config.batch_size, device=device, polar=polar, direction=direction)
+            Encoder = TSGPTEncoder(input_dims, output_dims, embed_dims, num_heads, num_layers, ffn_dims, config.dropout).to(device)
+            optim = torch.optim.Adam(Encoder.parameters(), lr=config.lr, weight_decay=1e-5)
+            loss_log, score_log = fit(Encoder, train_loader, test_loader, optim, num_epochs, eval_every, config.temperature, device, dset_name, verbose=False, visualize=False, pooling='last')
+
+            for loss in loss_log:
+                wandb.log({'loss': loss})
+            for score_dict in score_log:
+                wandb.log(score_dict)
+
+    wandb.agent(sweep_id, function=sweep, count=50)
+
+
+if __name__ == "__main__":
+    for dset_name in dataset:
+        run_sweep_for_dataset(dset_name, sweep_config)
