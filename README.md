@@ -1,1 +1,1 @@
-# Air-Traffic-Contrastive-Coding
+# Aircraft Trajectory Segmentation-based Contrastive Coding
