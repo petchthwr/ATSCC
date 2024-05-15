@@ -26,7 +26,8 @@ def plot_umap_embeddings(umap_result, cluster_assignments, figure_name):
         plt.scatter(umap_result[cluster_assignments == i, 0],
                     umap_result[cluster_assignments == i, 1],
                     color=color,
-                    label='Cluster ' + str(i) if i != -1 else 'Noise')
+                    label='Cluster ' + str(i) if i != -1 else 'Noise',
+                    s=1)
 
     plt.legend()
     plt.title('UMAP Embeddings')
@@ -163,9 +164,9 @@ def visualize_encoding_ADSB(encodings, traj, split_ind, path, idx):
     encodings = encodings[~np.isnan(encodings).any(axis=1)]
     encodings = encodings / np.linalg.norm(encodings, axis=1, keepdims=True)
 
-    f = plt.figure(figsize=(30, 10.5))
+    f = plt.figure(figsize=(30/2, 16/2))
     # Create a gridspec object with 2 rows and 2 columns
-    gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1], width_ratios=[1, 2])
+    gs = gridspec.GridSpec(2, 2, height_ratios=[1, 1], width_ratios=[1.4, 1.6])
 
     # Create a list to hold the axes objects
     axs = []
@@ -177,12 +178,13 @@ def visualize_encoding_ADSB(encodings, traj, split_ind, path, idx):
 
     # Plot the first subplot as a line plot
     axs[0].plot(traj[0, :], traj[1, :])  # Use line plot
-    axs[0].scatter(traj[0, split_ind], traj[1, split_ind], color='r', s=100, marker='x')
+    axs[0].scatter(traj[0, split_ind], traj[1, split_ind], color='r', s=50, marker='x')
     axs[0].grid(True)
-    axs[0].set_xlabel('X', fontsize=16)
-    axs[0].set_ylabel('Y', fontsize=16)
-    axs[0].set_title('2D Topview Aircraft Trajectory', fontsize=24, fontweight='bold')
+    axs[0].set_xlabel('X', fontsize=18)
+    axs[0].set_ylabel('Y', fontsize=18)
     axs[0].tick_params(axis='both', labelsize=16)
+    axs[0].set_aspect('equal')
+    axs[0].set_title('2D Topview Aircraft Trajectory', fontsize=18)
     axs[0].set_aspect('equal')
     axs[0].set_xlim(-1, 1) # Set x-axis limits
     axs[0].set_ylim(-1, 1) # Set aspect ratio to make it square
@@ -190,31 +192,43 @@ def visualize_encoding_ADSB(encodings, traj, split_ind, path, idx):
     axs[0].add_patch(circle)
 
     # Plot the second subplot as a line plot
-    features = ['x', 'y', 'z', 'ux', 'uy', 'uz', 'r', 'sin_theta', 'cos_theta']
+    features = [r'$r_x$', r'$r_y$', r'$r_z$', r'$u_x$', r'$u_y$', r'$u_z$', r'$\rho$', r'$\sin(\theta)$', r'$\sin(\theta)$']
     for feat in range(min(traj.shape[0], traj.shape[1])):
         axs[1].plot(np.arange(traj.shape[1]), traj[feat], label=features[feat])
 
     # Plot the vertical lines at the split indices
     for split in split_ind:
-        axs[1].axvline(x=split, color='k', linestyle='--', linewidth=1)
+        axs[1].axvline(x=split, color='k', linestyle='--', linewidth=0.5, alpha=0.8)
 
-    axs[1].set_title('Aircraft Trajectory States', fontsize=24, fontweight='bold')
-    axs[1].set_xlabel('Time', fontsize=16)
-    axs[1].set_ylabel('Value', fontsize=16)
+    axs[1].set_title('Aircraft Trajectory States', fontsize=18)
+    axs[1].set_xlabel('Timestamp', fontsize=18)
+    axs[1].set_ylabel('Values', fontsize=18)
+
+    axs[1].set_xticks(np.arange(0, traj.shape[1], 10))
+    axs[1].set_xticklabels(np.arange(0, traj.shape[1], 10) * 5, rotation=90)
     axs[1].tick_params(axis='both', labelsize=16)
     axs[1].grid(False)
-    axs[1].legend(fontsize=16)
+
+    axs[1].legend(loc='upper center', bbox_to_anchor=(0.5, -0.4),
+           fancybox=True, ncol=len(features) // 2 + 1, fontsize=12)
     axs[1].set_aspect('auto')
+    axs[1].set_xlim(0, traj.shape[1] - 1)
 
     # Plot the third subplot as a heatmap
     sns.heatmap(encodings.T, cbar=False, cmap='viridis')
     for split in split_ind[:-1]:
-        axs[2].axvline(x=split, color='k', linestyle='--', linewidth=1)
+        axs[2].axvline(x=split, color='k', linestyle='--', linewidth=0.5, alpha=0.8)
 
-    axs[2].set_title('Encoded Trajectory', fontsize=24, fontweight='bold')
-    axs[2].set_ylabel('Encoding dimensions', fontsize=16)
-    axs[2].set_xlabel('Encoding windows', fontsize=16)
-    axs[2].tick_params(axis='both', labelsize=8)
+    axs[2].set_title('Encoded Trajectory', fontsize=18)
+    axs[2].set_ylabel('Repr dims', fontsize=18)
+    axs[2].set_xlabel('Timestamp', fontsize=18)
+
+    axs[2].set_xticks(np.arange(0, encodings.shape[0], 10))
+    axs[2].set_yticks(np.arange(0, encodings.shape[1] + 40, 40))
+    axs[2].set_xticklabels(np.arange(0, encodings.shape[0], 10) * 5)
+    axs[2].set_yticklabels(np.arange(0, encodings.shape[1] + 40, 40))
+    axs[2].tick_params(axis='both', labelsize=16)
+
     axs[2].set_aspect('auto')
     f.tight_layout()
     plt.savefig(os.path.join("./figures/%s" % path, f"embedding_trajectory_hm_{idx}.png"))
@@ -251,7 +265,11 @@ def calculate_NMI_ARI(clus_model, to_be_fit, filename, true_label=None):
     nmi = []
     ari = []
     mi = []
-    cluster_range = np.arange(18, 202)[::2]
+    min_cluster = len(np.unique(true_label))
+    cluster_range = [min_cluster]
+
+    #cluster_range = [16, 18, 20, 22, 196, 198, 200] # for rapid testing
+    #cluster_range = np.arange(min_cluster, 202)[::2]
     for n_cluster in cluster_range:
         clus_model.n_clusters = n_cluster
         clus_model.fit(to_be_fit)
@@ -265,7 +283,7 @@ def calculate_NMI_ARI(clus_model, to_be_fit, filename, true_label=None):
         ari.append(ari_score)
         mi.append(mi_score)
 
-    # Plot versus number of clusters
+    """# Plot versus number of clusters
     fig, ax = plt.subplots(3, 1, figsize=(10, 15))
 
     ax[0].plot(cluster_range, nmi)
@@ -284,7 +302,7 @@ def calculate_NMI_ARI(clus_model, to_be_fit, filename, true_label=None):
     ax[2].set_title('MI for varying number of clusters')
 
     plt.tight_layout()
-    plt.savefig(filename)
+    plt.savefig(filename)"""
 
     # Write txt report, change path name
     with open(filename.with_suffix('.txt'), "w") as f:

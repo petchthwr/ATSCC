@@ -3,7 +3,7 @@ from . import _eval_protocols as eval_protocols
 from sklearn.preprocessing import label_binarize
 from sklearn.metrics import average_precision_score
 
-def eval_classification(model, train_repr, train_labels, test_repr, test_labels, eval_protocol='linear'):
+def eval_classification(train_repr, train_labels, test_repr, test_labels, eval_protocol='svm'):
     assert train_labels.ndim == 1 or train_labels.ndim == 2
 
     if eval_protocol == 'linear':

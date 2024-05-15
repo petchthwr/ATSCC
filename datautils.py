@@ -110,6 +110,7 @@ class ATPCCDataset(data.Dataset):
         self.eval = eval
         train_flag = 'train' if not eval else 'test'
         self.label = y
+        self.num_classes = len(np.unique(y)) if y is not None else None
         self.epsilon = epsilon
         self.polar = polar
         self.direction = direction
@@ -156,7 +157,6 @@ class ATPCCDataset(data.Dataset):
         if self.eval: # If not using augmentation, return the original time series
             return features, self.procedural_labels[i], self.label[i] if self.label is not None else None
 
-        # Our augmentation simplify
         aug1, proc_label1 = x, proc_label
         return aug1, proc_label1
 

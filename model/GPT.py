@@ -143,7 +143,7 @@ class LearnablePositionalEncoding(nn.Module):
         return x
 
 class TSGPTEncoder(nn.Module):
-    def __init__(self, input_dims, output_dims, embed_dim, num_heads, num_layers, hidden_dim, dropout=0.0, max_length=1500):
+    def __init__(self, input_dims, output_dims, embed_dim, num_heads, num_layers, hidden_dim, dropout=0.0, ablationtag=None, max_length=1000):
         super().__init__()
 
         # Model Configurations
@@ -154,16 +154,33 @@ class TSGPTEncoder(nn.Module):
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.dropout = dropout
-        self.max_length = max_length
 
         # Model Layers
         self.pre_proj = nn.Linear(input_dims, embed_dim)
-        #self.positional_embedding = LearnablePositionalEncoding(embed_dim, max_length)
+
+        """if ablationtag == 'learnable_pos':
+            self.positional_embedding = LearnablePositionalEncoding(embed_dim, max_length)
+        elif ablationtag == 'sinusoidal_pos':
+            self.positional_embedding = SinusoidalPositionalEncoding(embed_dim, max_length)
+        else:
+            self.positional_embedding = None"""
+
         self.layers = nn.ModuleList([
             TransfomerCausalEncoderLayer(embed_dim, num_heads, hidden_dim, dropout=dropout)
             for _ in range(num_layers)
         ])
         self.post_proj = nn.Linear(embed_dim, output_dims)
+        self.final_proj = nn.Linear(output_dims, output_dims // 2)
+
+        """self.preL2 = True
+        self.postL2 = True
+        if ablationtag == 'w/o token L2':
+            self.preL2 = False
+        elif ablationtag == 'w/o repr L2':
+            self.postL2 = False
+        elif ablationtag == 'w/o L2':
+            self.preL2 = False
+            self.postL2 = False"""
 
     def generate_causal_mask(self, x):
         mask = torch.triu(x.new_ones(x.size(1), x.size(1)), diagonal=1).to(x.device).bool()
@@ -172,22 +189,34 @@ class TSGPTEncoder(nn.Module):
     def generate_pad_mask(self, x):
         return torch.isnan(x).any(dim=-1)
 
+    def generate_random_mask(self, x, p): # Size must be (B, S)
+        return torch.rand(x.size(0), x.size(1), device=x.device) > p
     def forward(self, x):
 
         # Generate masks
         pad_mask = self.generate_pad_mask(x)
         causal_mask = self.generate_causal_mask(x)
+        combined_mask = pad_mask | self.generate_random_mask(x, 0.2) if self.training else pad_mask # Perturb 10% of the data
 
-        x[pad_mask] = 0
-
+        x[combined_mask] = 0
         x = self.pre_proj(x)
-        x = F.normalize(x, p=2, dim=-1)
+        x = F.normalize(x, p=2, dim=-1) #if self.preL2 else x # For ablation study
+
+        #if self.positional_embedding is not None:
+        #    x = self.positional_embedding(x)
 
         for layer in self.layers:
-            x = layer(x, pad_mask, causal_mask)
+            x = layer(x, combined_mask, causal_mask)
 
         x = self.post_proj(x)
-        x = F.normalize(x, p=2, dim=-1)
+        x = F.normalize(x, p=2, dim=-1) #if self.postL2 else x # For ablation study
 
+        x[pad_mask] = float('nan')
+        return x
+
+    def final_projection(self, x):
+        pad_mask = self.generate_pad_mask(x)
+        x[pad_mask] = 0
+        x = self.final_proj(x)
         x[pad_mask] = float('nan')
         return x

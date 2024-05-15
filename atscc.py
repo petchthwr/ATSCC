@@ -4,7 +4,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from datautils import *
 from plotutils import *
-from model.encoder import TSEncoder
+from model.encoder import TSEncoder, TSEncoderLSTM
 from model.autoregressive import TransformerTSEncoder
 from model.GPT import TSGPTEncoder
 from losses.losses import *
@@ -19,14 +19,16 @@ import warnings
 import pickle
 import time
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-def reproducibility(seed=42):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+def reproducibility(SEED):
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = True
 
-
-def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False):
+def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False, shuffle=True):
 
     datapath = data_to_path(dataset)
     x_train, x_test, y_train, y_test = load_ATFM_data(datapath, split_point, downsample=downsample, size_lim=size_lim)
@@ -34,7 +36,7 @@ def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.0
     train_dataset = ATPCCDataset(x_train, y_train, rdp_epsilon, False, device, direction=direction, polar=polar)
     test_dataset = ATPCCDataset(x_test, y_test, rdp_epsilon, True, device, direction=direction, polar=polar, fitted_scaler=train_dataset.scaler)
 
-    train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=pad_stack_train, pin_memory=True, num_workers=4)
+    train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=pad_stack_train, pin_memory=True, num_workers=4)
     test_loader = data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=pad_stack_test, pin_memory=True, num_workers=4)
 
     return train_loader, test_loader
@@ -78,9 +80,9 @@ def encode(model, loader, device, pooling='last'):
     loader.dataset.eval = True
 
     with torch.no_grad():
-        output, traj, full_encode = [], [], []
+        output, traj, full_encode, label_list = [], [], [], []
         split_ind = []
-        for batch, proc_label, _ in loader:
+        for batch, proc_label, label in loader:
 
             x = batch.to(device)
             traj.append(x.cpu().numpy())
@@ -96,14 +98,21 @@ def encode(model, loader, device, pooling='last'):
 
             split_ind.extend([find_split_indices(label[~label.isnan()]) for label in proc_label])
 
+            # Label
+            if label is None:
+                label_list = None
+            else:
+                label_list.append(label)
+
         max_T = max([t.shape[1] for t in traj])
         traj = np.vstack([np.pad(t, ((0, 0), (0, max_T - t.shape[1]), (0, 0)), 'constant', constant_values=np.nan) for t in traj])
         full_encode = np.vstack([np.pad(t, ((0, 0), (0, max_T - t.shape[1]), (0, 0)), 'constant', constant_values=np.nan) for t in full_encode])
         output = torch.cat(output, dim=0)
+        label_list = torch.cat(label_list, dim=0).cpu().numpy() if label_list is not None else None
 
     model.train(org_training)
 
-    return output.cpu().numpy(), traj, full_encode, split_ind
+    return output.cpu().numpy(), traj, full_encode, split_ind, label_list
 
 
 def get_loader_label(loader):
@@ -118,17 +127,21 @@ def get_loader_label(loader):
     return torch.cat(labels, dim=0).cpu().numpy()
 
 
-def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, pooling='last', eval_method='clustering', final=False, visualize=False):
+def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling='last', eval_method='clustering', final=False, visualize=False):
+    # If path does not exist, create it
+    Path(f'figures/{datapath}/UMAP').mkdir(parents=True, exist_ok=True)
+    Path(f'figures/{datapath}/trajectories').mkdir(parents=True, exist_ok=True)
+    Path(f'figures/{datapath}/clustered').mkdir(parents=True, exist_ok=True)
+    Path(f'figures/{datapath}/dendrogram').mkdir(parents=True, exist_ok=True)
+    Path(f'figures/{datapath}/scores').mkdir(parents=True, exist_ok=True)
+
     ori_train_loader_eval = train_loader.dataset.eval
     ori_train_collate_fn = train_loader.collate_fn
     train_loader.dataset.eval = True
     train_loader.collate_fn = pad_stack_test
 
-    train_repr, train_traj, train_full_encode, split_ind_train = encode(Encoder, train_loader, device)
-    train_label = get_loader_label(train_loader)
-
-    test_repr, test_traj, test_full_encode, split_ind_test = encode(Encoder, test_loader, device, pooling=pooling)
-    test_label = get_loader_label(test_loader)
+    train_repr, train_traj, train_full_encode, split_ind_train, train_label = encode(Encoder, train_loader, device, pooling=pooling)
+    test_repr, test_traj, test_full_encode, split_ind_test, test_label = encode(Encoder, test_loader, device, pooling=pooling)
 
     # Inverse transform the data traj
     test_traj = test_loader.dataset.time_series
@@ -140,53 +153,43 @@ def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, poolin
 
     if visualize:
         if test_label is not None:
-            index_to_sample = range(len(test_full_encode))[::10]
+            index_to_sample = range(len(test_full_encode))[::50]
             index_to_sample = sorted(index_to_sample, key=lambda x: test_label[x])
         else:
-            index_to_sample = range(len(test_full_encode))[::10]
+            index_to_sample = range(len(test_full_encode))[::50]
         for i in index_to_sample:
             visualize_encoding_ADSB(test_full_encode[i], test_traj[i][~np.isnan(test_traj[i]).all(axis=1)], split_ind_test[i], datapath, i)
 
-    n_cluster = len(set(test_label)) if test_label is not None else 18
-    clus_model = cluster.AgglomerativeClustering(n_clusters=n_cluster)
+    n_cluster = len(set(test_label)) if test_label is not None else 16
+    clus_model.n_clusters = n_cluster
     umap = UMAP(n_components=2)
 
-    if eval_method == 'classification':
-        if test_label is None:
-            raise ValueError('Test labels are not provided')
+    if test_label is None:
+        raise ValueError('Test labels are not provided')
 
-        out, eval_res = tasks.eval_classification(Encoder, train_repr, train_label, test_repr, test_label, eval_protocol='svm')
-        acc = eval_res['acc']
-        score = {'Accuracy': acc}
+    out, eval_res = tasks.eval_classification(train_repr, train_label, test_repr, test_label, eval_protocol='svm')
+    acc = eval_res['acc']
+    auprc = eval_res['auprc']
 
-    elif eval_method == 'clustering':
-        umap_result = umap.fit_transform(test_repr)
-        cluster_assignments = clus_model.fit_predict(test_repr)
+    #umap_result = umap.fit_transform(test_repr)
+    cluster_assignments = clus_model.fit_predict(test_repr)
 
-        # If path does not exist, create it
-        Path(f'figures/{datapath}/UMAP').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/trajectories').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/clustered').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/dendrogram').mkdir(parents=True, exist_ok=True)
-        Path(f'figures/{datapath}/scores').mkdir(parents=True, exist_ok=True)
-
-        if test_label is not None:
-            plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}.png')
-            max_nmi, max_ari, max_mi, best_num_clusters_nmi, best_num_clusters_ari, best_num_clusters_mi = (
-                calculate_NMI_ARI(clus_model, test_repr, Path(f'figures/{datapath}/scores') / f'scores_epoch_{epoch}.png', test_label))
-            score = {'NMI': max_nmi, 'ARI': max_ari, 'MI': max_mi, 'n*NMI': best_num_clusters_nmi, 'n*ARI': best_num_clusters_ari, 'n*MI': best_num_clusters_mi}
-            clus_model.n_clusters = best_num_clusters_nmi
-        else:
-            silhouette_score = metrics.silhouette_score(test_repr, cluster_assignments)
-            davies_bouldin_score = metrics.davies_bouldin_score(test_repr, cluster_assignments)
-            score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}
-
-        plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
-        plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
-        plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
-
+    if test_label is not None:
+        #plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}.png')
+        max_nmi, max_ari, max_mi, best_num_clusters_nmi, best_num_clusters_ari, best_num_clusters_mi = (
+            calculate_NMI_ARI(clus_model, test_repr, Path(f'figures/{datapath}/scores') / f'scores_epoch_{epoch}.png', test_label))
+        #score = {'NMI': max_nmi, 'ARI': max_ari, 'MI': max_mi, 'n*NMI': best_num_clusters_nmi, 'n*ARI': best_num_clusters_ari, 'n*MI': best_num_clusters_mi}
+        score = {'NMI': max_nmi, 'ARI': max_ari, 'MI': max_mi, 'ACC': acc, 'AUPRC': auprc}
+        clus_model.n_clusters = best_num_clusters_nmi
     else:
-        raise NotImplementedError
+        ValueError('Test labels are not provided')
+        """silhouette_score = metrics.silhouette_score(test_repr, cluster_assignments)
+        davies_bouldin_score = metrics.davies_bouldin_score(test_repr, cluster_assignments)
+        score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}"""
+
+    #plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
+    #plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
+    #plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
 
     if final: # Compute dtw matrix for full encoding
         dtw_matrix = dtw.distance_matrix_fast(test_full_encode.astype(np.double), parallel=True)
@@ -216,43 +219,52 @@ def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, poolin
     return score
 
 
-def epoch_run(Encoder, loader, device, optim, local_temp, portion=1.0):
+"""global_loss = 0.0
+if alpha != 0:
+    aug2 = aug2.to(device)
+    out2 = Encoder(aug2)
+    global_infoNCE(out1, out2, pooling='last', temperature=global_temp) if not isinstance(out1, list) else (
+        global_infoNCE(out1[-1], out2[-1], pooling='last', temperature=global_temp))
+else:
+    global_loss = 0.0
+
+max_pooled_out = apply_pooling(out1, proc_label1, pooling='max').unsqueeze(1) # (B, 1, D)
+out1 = torch.cat([max_pooled_out, out1], dim=1) # (B, T+1, D)
+last_proc_label = torch.tensor([p[~p.isnan()][-1] if p[~p.isnan()].nelement() > 0 else float('nan') for p in proc_label1]) # (B)
+last_proc_label = last_proc_label.unsqueeze(1).to(proc_label1.device) # (B, 1)
+proc_label1 = torch.cat([last_proc_label, proc_label1], dim=1) # (B, T+1)"""
+
+def epoch_run(Encoder, loader, device, optim, scheduler, local_temp, current_iter, max_iter):
+
     epoch_loss = 0.0
     Encoder.train()
+
+    iter_elapsed = 0
     for aug1, proc_label1 in loader:
 
         aug1 = aug1.to(device)
         proc_label1 = proc_label1.to(device)
-
         out1 = Encoder(aug1)
+        #out1 = Encoder.final_projection(out1)
+        loss = flat_snnl(out1, proc_label1, temperature=local_temp, portion=1.0) #if not isinstance(out1, list) else (layer_wise_snnl(out1, proc_label1, temperature=local_temp, portion=1.0))
 
-        """global_loss = 0.0
-        if alpha != 0:
-            aug2 = aug2.to(device)
-            out2 = Encoder(aug2)
-            global_infoNCE(out1, out2, pooling='last', temperature=global_temp) if not isinstance(out1, list) else (
-                global_infoNCE(out1[-1], out2[-1], pooling='last', temperature=global_temp))
+        if current_iter < max_iter:
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+            if scheduler is not None:
+                scheduler.step()
+
+            current_iter += 1
+            iter_elapsed += 1
         else:
-            global_loss = 0.0"""
-
-        """max_pooled_out = apply_pooling(out1, proc_label1, pooling='max').unsqueeze(1) # (B, 1, D)
-        out1 = torch.cat([max_pooled_out, out1], dim=1) # (B, T+1, D)
-        last_proc_label = torch.tensor([p[~p.isnan()][-1] if p[~p.isnan()].nelement() > 0 else float('nan') for p in proc_label1]) # (B)
-        last_proc_label = last_proc_label.unsqueeze(1).to(proc_label1.device) # (B, 1)
-        proc_label1 = torch.cat([last_proc_label, proc_label1], dim=1) # (B, T+1)"""
-
-
-        loss = flat_snnl(out1, proc_label1, temperature=local_temp, portion=portion) if not isinstance(out1, list) else (layer_wise_snnl(out1, proc_label1, temperature=local_temp, portion=portion))
-
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
+            break
 
         epoch_loss += loss.item()
 
-    epoch_loss = epoch_loss / len(loader)
-
-    return epoch_loss, Encoder
+    epoch_loss = epoch_loss / iter_elapsed
+    return epoch_loss, Encoder, current_iter
 
 
 def compute_sampling_loss(out, label, temperature, times_sampling, num_sampling, device):
@@ -378,92 +390,39 @@ def data_to_path(data):
         raise ValueError('Invalid data')
 
 
-def fit(Encoder, train_loader, test_loader, optim, num_epochs, eval_every, local_temp, device, data, pooling='last', eval_method='clustering', verbose=True, visualize=False):
+def fit(Encoder, train_loader, test_loader, optim, scheduler, num_epochs, max_iter, eval_every, local_temp, device, data, clus_model, pooling='last', eval_method='clustering', verbose=True, visualize=False):
     loss_log, score_log = [], []
     datapath = data_to_path(data)
 
+    if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
+        os.makedirs(os.path.join(f'ckpt/{datapath}'))
+
+    # EvaLuate the model before training
+    #score = evaluate(train_loader, test_loader, Encoder, device, 0, datapath, clus_model, pooling=pooling, eval_method=eval_method, visualize=visualize)
+    #score_log.append(score)
+    #print(f'Epoch: INIT ==> Loss: 0.0 {scoredict_to_str(score)}')
+
+    current_iter = 0
+    num_epochs = int(num_epochs)
     for epoch in range(num_epochs):
         st = time.time()
-        epoch_loss, Encoder = epoch_run(Encoder, train_loader, device, optim, local_temp=local_temp)  # Train model
+        epoch_loss, Encoder, current_iter = epoch_run(Encoder, train_loader, device, optim, scheduler, local_temp, current_iter, max_iter)  # Train model
         loss_log.append(epoch_loss)  # Log loss
 
-        if epoch % eval_every == 0 or epoch == num_epochs - 1:
+        if epoch % eval_every == 0 or epoch == num_epochs - 1 or current_iter >= max_iter:
             epoch = epoch + 1 if epoch == num_epochs - 1 else epoch  # Epoch num correction
-
-            if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
-                os.makedirs(os.path.join(f'ckpt/{datapath}'))
             torch.save(Encoder.state_dict(), os.path.join(f'ckpt/{datapath}/encoder_epoch_{epoch}.pt'))
-
-            score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, pooling=pooling, eval_method=eval_method, visualize=visualize)
+            score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling=pooling, eval_method=eval_method, visualize=visualize)
             score_log.append(score)
-
-            print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} {scoredict_to_str(score)}')
+            print(f'Epoch: {epoch}, Iter: {current_iter} ==> Loss: {epoch_loss:.6f} {scoredict_to_str(score)}')
 
         if epoch % 10 == 0 and verbose:
             et = time.time()
             print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} Time elapsed: {et - st:.2f} seconds')
 
+        if current_iter >= max_iter:
+            break
+
     return loss_log, score_log
-
-"""seed = 2
-reproducibility(seed)
-device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
-
-# Data loader parameters
-datapath = 'data/ESSA/arrival'
-split_point = 'auto'
-rdp_epsilon = 0.001
-batch_size = 86
-
-# Encoder parameters
-input_dims = 9
-output_dims = 320
-hidden_dims = 2048
-num_heads = 8
-embed_dims = 512
-num_layers = 6
-
-# Optimizer parameters
-learning_rate = 1e-4
-num_epochs = 150
-eval_every = 50
-
-# Loss Parameters
-local_temp = 1.0
-dropout = 0.1
-
-# Load data
-train_loader, test_loader = load_data(datapath, split_point, downsample=4, size_lim=5000,
-                                                             rdp_epsilon=rdp_epsilon, batch_size=batch_size,
-                                                             device=device, polar=True, direction=True)
-
-# Create model and optimizer
-Encoder = TSGPTEncoder(input_dims, output_dims, embed_dims, num_heads, num_layers, hidden_dims, dropout).to(device)
-#Encoder = TSEncoder(input_dims, output_dims, hidden_dims, num_layers, dropout=dropout, all_out=False).to(device)
-optim = torch.optim.Adam(Encoder.parameters(), lr=learning_rate, weight_decay=1e-5)
-
-score = evaluate(train_loader, test_loader, Encoder, device, 9999, datapath, pooling='last', eval_method='clustering')
-score_str = ''
-for key, val in score.items():
-    score_str += f'{key}: {val:.6f} '
-et = time.time()
-print(f'Initialized Model: {score_str}')
-for epoch in range(num_epochs):
-    st = time.time()
-    epoch_loss, Encoder = epoch_run(Encoder, train_loader, device, optim, local_temp=local_temp)
-    if epoch % eval_every == 0 or epoch == num_epochs - 1:
-        epoch = epoch + 1 if epoch == num_epochs - 1 else epoch
-        if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
-            os.makedirs(os.path.join(f'ckpt/{datapath}'))
-        torch.save(Encoder.state_dict(), os.path.join(f'ckpt/{datapath}/encoder_epoch_{epoch}.pt'))
-        score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, pooling='last', eval_method='clustering')
-        score_str = ''
-        for key, val in score.items():
-            score_str += f'{key}: {val:.6f} '
-        et = time.time()
-        print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} {score_str} Time elapsed: {et - st:.2f} seconds')
-    elif epoch % 10 == 0:
-        et = time.time()
-        print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} Time elapsed: {et - st:.2f} seconds')"""
 
 

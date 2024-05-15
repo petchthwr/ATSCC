@@ -272,9 +272,9 @@ def soft_nearest_neighbor_loss(x, y, T):
     sim.fill_diagonal_(0) # Remove self-similarity
     masks = torch.eq(y[:, None], y[None, :]).bool() # Create a mask for instances with the same label
 
-    numerator = torch.logsumexp(sim * masks, dim=1)
-    denominator = torch.logsumexp(sim * ~masks, dim=1) #* ~masks
-    loss = torch.mean(denominator - numerator)
+    numerator = torch.logsumexp(sim * masks, dim=1) # Positive instances
+    denominator = torch.logsumexp(sim * ~masks, dim=1) #* ~masks # Negative instances
+    loss = torch.mean(denominator - numerator) # If loss is negative, it means that the positive instances are closer than the negative instances
 
     return loss
 

@@ -9,7 +9,7 @@ from sklearn.model_selection import GridSearchCV, train_test_split
 
 VERY_LARGE_NUMBER = 1e20
 
-def fit_svm(features, y, MAX_SAMPLES=10000):
+def fit_svm(features, y, MAX_SAMPLES=100000):
     nb_classes = np.unique(y, return_counts=True)[1].shape[0]
     train_size = features.shape[0]
 
