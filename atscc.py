@@ -17,6 +17,33 @@ def reproducibility(SEED):
     torch.cuda.manual_seed(SEED)
     torch.backends.cudnn.deterministic = True
 
+def scoredict_to_str(score):
+    score_str = ''
+    for key, val in score.items():
+        score_str += f'{key}: {val:.6f} '
+    return score_str
+
+
+def data_to_path(data):
+    if data == 'RKSIa':
+        return 'data/RKSI/arrival'
+    elif data == 'RKSId':
+        return 'data/RKSI/departure'
+    elif data == 'ESSA':
+        return 'data/ESSA/arrival'
+    elif data == 'LSZH':
+        return 'data/LSZH/arrival'
+    elif data == 'RKSIa_v':
+        return 'data/RKSI/arrival_v'
+    elif data == 'RKSId_v':
+        return 'data/RKSI/departure_v'
+    elif data == 'ESSA_v':
+        return 'data/ESSA/arrival_v'
+    elif data == 'LSZH_v':
+        return 'data/LSZH/arrival_v'
+    else:
+        raise ValueError('Invalid data')
+
 def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False, shuffle=True):
 
     datapath = data_to_path(dataset)
@@ -160,22 +187,23 @@ def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_m
     acc = eval_res['acc']
     auprc = eval_res['auprc']
 
-    #umap_result = umap.fit_transform(test_repr)
     cluster_assignments = clus_model.fit_predict(test_repr)
 
     if test_label is not None:
-        #plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}.png')
         max_nmi, max_ari, max_mi, best_num_clusters_nmi, best_num_clusters_ari, best_num_clusters_mi = (
             calculate_NMI_ARI(clus_model, test_repr, Path(f'figures/{datapath}/scores') / f'scores_epoch_{epoch}.png', test_label))
-        #score = {'NMI': max_nmi, 'ARI': max_ari, 'MI': max_mi, 'n*NMI': best_num_clusters_nmi, 'n*ARI': best_num_clusters_ari, 'n*MI': best_num_clusters_mi}
         score = {'NMI': max_nmi, 'ARI': max_ari, 'MI': max_mi, 'ACC': acc, 'AUPRC': auprc}
         clus_model.n_clusters = best_num_clusters_nmi
     else:
+        score = None
         ValueError('Test labels are not provided')
 
-    #plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
-    #plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
-    #plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
+    if visualize:
+        umap_result = umap.fit_transform(test_repr)
+        plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}.png')
+        plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
+        plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
+        plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
 
     train_loader.dataset.eval = ori_train_loader_eval
     train_loader.collate_fn = ori_train_collate_fn
@@ -215,6 +243,38 @@ def epoch_run(Encoder, loader, device, optim, scheduler, local_temp, current_ite
     return epoch_loss, Encoder, current_iter
 
 
+def fit(Encoder, train_loader, test_loader, optim, scheduler, num_epochs, max_iter, eval_every, local_temp, device, data, clus_model, pooling='last', eval_method='clustering', verbose=True, visualize=False):
+    loss_log, score_log = [], []
+    datapath = data_to_path(data)
+
+    if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
+        os.makedirs(os.path.join(f'ckpt/{datapath}'))
+
+    current_iter = 0
+    num_epochs = int(num_epochs)
+    for epoch in range(num_epochs):
+        st = time.time()
+        epoch_loss, Encoder, current_iter = epoch_run(Encoder, train_loader, device, optim, scheduler, local_temp, current_iter, max_iter)  # Train model
+        loss_log.append(epoch_loss)  # Log loss
+
+        if epoch % eval_every == 0 or epoch == num_epochs - 1 or current_iter >= max_iter:
+            epoch = epoch + 1 if epoch == num_epochs - 1 else epoch  # Epoch num correction
+            torch.save(Encoder.state_dict(), os.path.join(f'ckpt/{datapath}/encoder_epoch_{epoch}.pt'))
+            score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling=pooling, eval_method=eval_method, visualize=visualize)
+            score_log.append(score)
+            print(f'Epoch: {epoch}, Iter: {current_iter} ==> Loss: {epoch_loss:.6f} {scoredict_to_str(score)}')
+
+        if epoch % 10 == 0 and verbose:
+            et = time.time()
+            print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} Time elapsed: {et - st:.2f} seconds')
+
+        if current_iter >= max_iter:
+            break
+
+    return loss_log, score_log
+
+
+"""
 def compute_sampling_loss(out, label, temperature, times_sampling, num_sampling, device):
     # Pad the outputs and labels
     max_length = max([o.size(1) for o in out])  # Find the maximum length
@@ -257,21 +317,9 @@ def compute_sampling_loss(out, label, temperature, times_sampling, num_sampling,
 
     return loss
 
-
 def rearrange_out(batch_by_layer):
-    """
-    Rearrange a list of lists from (num_batch * num_layer) to (num_layer * num_batch).
-
-    :param batch_by_layer: A list of lists where the outer list is num_batch and
-                           each inner list is num_layer.
-    :return: A list of lists where the outer list is num_layer and
-             each inner list is num_batch.
-    """
-    # The * operator is used to unpack the list, allowing zip to transpose it
     layer_by_batch = list(zip(*batch_by_layer))
     return [list(layer) for layer in layer_by_batch]
-
-
 
 def epoch_run_sampling(Encoder, loader, device, optim, temperature, num_sampling=5000, times_sampling=32):
     Encoder.train()
@@ -308,69 +356,4 @@ def epoch_run_sampling(Encoder, loader, device, optim, temperature, num_sampling
     epoch_loss = loss.item()
 
     return epoch_loss, Encoder
-
-
-def scoredict_to_str(score):
-    score_str = ''
-    for key, val in score.items():
-        score_str += f'{key}: {val:.6f} '
-    return score_str
-
-
-def data_to_path(data):
-    if data == 'RKSIa':
-        return 'data/RKSI/arrival'
-    elif data == 'RKSId':
-        return 'data/RKSI/departure'
-    elif data == 'ESSA':
-        return 'data/ESSA/arrival'
-    elif data == 'LSZH':
-        return 'data/LSZH/arrival'
-    elif data == 'RKSIa_v':
-        return 'data/RKSI/arrival_v'
-    elif data == 'RKSId_v':
-        return 'data/RKSI/departure_v'
-    elif data == 'ESSA_v':
-        return 'data/ESSA/arrival_v'
-    elif data == 'LSZH_v':
-        return 'data/LSZH/arrival_v'
-    else:
-        raise ValueError('Invalid data')
-
-
-def fit(Encoder, train_loader, test_loader, optim, scheduler, num_epochs, max_iter, eval_every, local_temp, device, data, clus_model, pooling='last', eval_method='clustering', verbose=True, visualize=False):
-    loss_log, score_log = [], []
-    datapath = data_to_path(data)
-
-    if not os.path.exists(os.path.join(f'ckpt/{datapath}')):
-        os.makedirs(os.path.join(f'ckpt/{datapath}'))
-
-    # EvaLuate the model before training
-    #score = evaluate(train_loader, test_loader, Encoder, device, 0, datapath, clus_model, pooling=pooling, eval_method=eval_method, visualize=visualize)
-    #score_log.append(score)
-    #print(f'Epoch: INIT ==> Loss: 0.0 {scoredict_to_str(score)}')
-
-    current_iter = 0
-    num_epochs = int(num_epochs)
-    for epoch in range(num_epochs):
-        st = time.time()
-        epoch_loss, Encoder, current_iter = epoch_run(Encoder, train_loader, device, optim, scheduler, local_temp, current_iter, max_iter)  # Train model
-        loss_log.append(epoch_loss)  # Log loss
-
-        if epoch % eval_every == 0 or epoch == num_epochs - 1 or current_iter >= max_iter:
-            epoch = epoch + 1 if epoch == num_epochs - 1 else epoch  # Epoch num correction
-            torch.save(Encoder.state_dict(), os.path.join(f'ckpt/{datapath}/encoder_epoch_{epoch}.pt'))
-            score = evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling=pooling, eval_method=eval_method, visualize=visualize)
-            score_log.append(score)
-            print(f'Epoch: {epoch}, Iter: {current_iter} ==> Loss: {epoch_loss:.6f} {scoredict_to_str(score)}')
-
-        if epoch % 10 == 0 and verbose:
-            et = time.time()
-            print(f'Epoch: {epoch} ==> Loss: {epoch_loss:.6f} Time elapsed: {et - st:.2f} seconds')
-
-        if current_iter >= max_iter:
-            break
-
-    return loss_log, score_log
-
-
+"""
