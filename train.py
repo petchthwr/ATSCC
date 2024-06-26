@@ -1,8 +1,8 @@
 import torch.optim
-
 from atscc import *
+from model.GPT import TSGPTEncoder
 import wandb
-from sklearn.cluster import AgglomerativeClustering, KMeans, SpectralClustering
+from sklearn.cluster import KMeans
 
 device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
@@ -33,13 +33,13 @@ parameters_dict = {
         'values': [0, 1, 2, 3, 4] # Fixed
         },
     'rdp_epsilon': {
-        'values': [0.0001, 0.001, 0.01, 0.1] # RKSIa: 0.0001, RKSId: 0.1, ESSA: 0.0001, LSZH: 0.01
+        'values': [0.1] # RKSIa: 0.0001, RKSId: 0.1, ESSA: 0.0001, LSZH: 0.01
         },
     'batch_size': {
         'values': [16] # Fixed
         },
     'temperature': {
-        'values': [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0] # RKSIa: 10.0, RKSId: 5.0, ESSA: 0.01, LSZH: 0.1
+        'values': [5.0] # RKSIa: 10.0, RKSId: 5.0, ESSA: 0.01, LSZH: 0.1
         },
     'dropout': {
         'values': [0.35] # Fixed
@@ -58,13 +58,13 @@ def run_sweep_for_dataset(dset_name, sweep_config):
             config = wandb.config
 
             reproducibility(config.seed)
-            train_loader, test_loader = load_data(dset_name, split_point, downsample=5, size_lim=None, rdp_epsilon=config.rdp_epsilon[dset_name],
+            train_loader, test_loader = load_data(dset_name, split_point, downsample=5, size_lim=None, rdp_epsilon=config.rdp_epsilon,
                                                   batch_size=config.batch_size, device=device, polar=polar, direction=direction)
             Encoder = TSGPTEncoder(input_dims, output_dims, embed_dims, num_heads, num_layers, ffn_dims, config.dropout).to(device)
             optim = torch.optim.AdamW(Encoder.parameters(), lr=config.lr, weight_decay=1e-5)
             #scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=2500, gamma=0.5)
             clus_model = KMeans(n_clusters=2, random_state=config.seed)
-            loss_log, score_log = fit(Encoder, train_loader, test_loader, optim, None, num_epochs, max_iter, eval_every, config.temperature[dset_name], device, dset_name, clus_model,
+            loss_log, score_log = fit(Encoder, train_loader, test_loader, optim, None, num_epochs, max_iter, eval_every, config.temperature, device, dset_name, clus_model,
                                       verbose=False, visualize=False, pooling='last', eval_method='clustering')
 
             if len(parameters_dict['seed']) > 1:

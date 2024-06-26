@@ -1,8 +1,9 @@
 import torch.optim
-
 from atscc import *
 import wandb
-from sklearn.cluster import AgglomerativeClustering, KMeans, SpectralClustering
+from model.GPT import TSGPTEncoder
+from model.encoder import TSEncoder, TSEncoderLSTM
+from sklearn.cluster import KMeans
 
 device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
@@ -10,10 +11,10 @@ device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 wandb.login(key='dd48a2fe503f34d4c795ab3877f4fb93132843e1')
 
 split_point = 'auto'
-direction = True
+direction = False
 polar = True
 
-input_dims = 9
+input_dims = 6
 output_dims = 320
 num_layers = 12
 embed_dims = 768
@@ -25,7 +26,7 @@ batch_size = 16
 lr = 1e-5
 
 num_epochs = 10
-eval_every = 10
+eval_every = 5
 max_iter = 500000
 
 best_params = { # This will not be used for sweep
@@ -38,13 +39,13 @@ metric = {'name': 'NMI', 'goal': 'maximize'}
 sweep_config['metric'] = metric
 parameters_dict = {
     'seed': {
-        'values': [0] # Fixed
+        'values': [0, 1, 2, 3, 4]
         },
     'dset_name': {
         'values': ['RKSIa_v']
         },
     'tag': {
-        'values': [None] # Fixed
+        'values': ['w/o direction']
         },
     }
 sweep_config['parameters'] = parameters_dict

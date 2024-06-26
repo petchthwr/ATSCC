@@ -1,20 +1,9 @@
-import numpy as np
-import torch
-import matplotlib
-import matplotlib.pyplot as plt
 from datautils import *
 from plotutils import *
-from model.encoder import TSEncoder, TSEncoderLSTM
-from model.autoregressive import TransformerTSEncoder
-from model.GPT import TSGPTEncoder
 from losses.losses import *
-from losses.snnl import *
 from umap import UMAP
 import tasks
-from sklearn import cluster
-from sklearn import metrics
 from pathlib import Path
-from dtaidistance import dtw_ndim as dtw
 import warnings
 import pickle
 import time
@@ -127,7 +116,7 @@ def get_loader_label(loader):
     return torch.cat(labels, dim=0).cpu().numpy()
 
 
-def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling='last', eval_method='clustering', final=False, visualize=False):
+def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_model, pooling='last', eval_method='clustering', visualize=False):
     # If path does not exist, create it
     Path(f'figures/{datapath}/UMAP').mkdir(parents=True, exist_ok=True)
     Path(f'figures/{datapath}/trajectories').mkdir(parents=True, exist_ok=True)
@@ -183,56 +172,15 @@ def evaluate(train_loader, test_loader, Encoder, device, epoch, datapath, clus_m
         clus_model.n_clusters = best_num_clusters_nmi
     else:
         ValueError('Test labels are not provided')
-        """silhouette_score = metrics.silhouette_score(test_repr, cluster_assignments)
-        davies_bouldin_score = metrics.davies_bouldin_score(test_repr, cluster_assignments)
-        score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}"""
 
     #plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}.png')
     #plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}.png')
     #plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}.png')
 
-    if final: # Compute dtw matrix for full encoding
-        dtw_matrix = dtw.distance_matrix_fast(test_full_encode.astype(np.double), parallel=True)
-        clus_model.affinity = 'precomputed'
-        clus_model.linkage = 'average'
-        umap.metric = 'precomputed'
-
-        if test_label is not None:
-            nmi_score, ari_score, mi_score, best_num_clusters_nmi, best_num_clusters_ari, best_num_clusters_mi = (
-                calculate_NMI_ARI(clus_model, dtw_matrix, Path(f'figures/{datapath}/scores') / f'scores_epoch_{epoch}_full.png', test_label))
-            score = {'NMI': nmi_score, 'ARI': ari_score, 'MI': mi_score, 'n*NMI': best_num_clusters_nmi, 'n*ARI': best_num_clusters_ari, 'n*MI': best_num_clusters_mi}
-            clus_model.n_clusters = best_num_clusters_mi
-            umap_result = umap.fit_transform(dtw_matrix)
-            cluster_assignments = clus_model.fit_predict(dtw_matrix)
-            plot_umap_embeddings(umap_result, cluster_assignments, Path(f'figures/{datapath}/UMAP') / f'UMAP_epoch_{epoch}_full.png')
-            plot_umap_embeddings(umap_result, test_label, Path(f'figures/{datapath}/UMAP') / f'UMAP_true_epoch_{epoch}_full.png')
-            plot_2d_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/trajectories') / f'Trajectories_epoch_{epoch}_full.png')
-            plot_clustered_trajectories(test_traj, cluster_assignments, Path(f'figures/{datapath}/clustered') / f'Clustered_Trajectories_epoch_{epoch}_full.png')
-        else:
-            silhouette_score = metrics.silhouette_score(dtw_matrix, cluster_assignments)
-            davies_bouldin_score = metrics.davies_bouldin_score(dtw_matrix, cluster_assignments)
-            score = {'Silhouette': silhouette_score, 'DBI': davies_bouldin_score}
-
     train_loader.dataset.eval = ori_train_loader_eval
     train_loader.collate_fn = ori_train_collate_fn
 
     return score
-
-
-"""global_loss = 0.0
-if alpha != 0:
-    aug2 = aug2.to(device)
-    out2 = Encoder(aug2)
-    global_infoNCE(out1, out2, pooling='last', temperature=global_temp) if not isinstance(out1, list) else (
-        global_infoNCE(out1[-1], out2[-1], pooling='last', temperature=global_temp))
-else:
-    global_loss = 0.0
-
-max_pooled_out = apply_pooling(out1, proc_label1, pooling='max').unsqueeze(1) # (B, 1, D)
-out1 = torch.cat([max_pooled_out, out1], dim=1) # (B, T+1, D)
-last_proc_label = torch.tensor([p[~p.isnan()][-1] if p[~p.isnan()].nelement() > 0 else float('nan') for p in proc_label1]) # (B)
-last_proc_label = last_proc_label.unsqueeze(1).to(proc_label1.device) # (B, 1)
-proc_label1 = torch.cat([last_proc_label, proc_label1], dim=1) # (B, T+1)"""
 
 def epoch_run(Encoder, loader, device, optim, scheduler, local_temp, current_iter, max_iter):
 

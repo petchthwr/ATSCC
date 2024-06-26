@@ -111,45 +111,6 @@ def plot_clustered_trajectories(traj, cluster_assignments, figure_name):
     plt.savefig(figure_name)
     plt.close(fig)
 
-
-def plot_dendrogram(model, truncate_mode=None, p=12, leaf_rotation=90., leaf_font_size=12, save_path=None):
-    """
-    Plots the dendrogram of a hierarchical clustering model.
-
-    :param model: Hierarchical clustering model (e.g., from sklearn.cluster).
-    :param truncate_mode: Truncation mode for the dendrogram.
-    :param p: The p parameter for truncate_mode.
-    :param leaf_rotation: Rotation of the x-axis labels.
-    :param leaf_font_size: Font size of the x-axis labels.
-    :param save_path: Path to save the dendrogram plot.
-    """
-    # Create the counts of samples under each node
-    counts = np.zeros(model.children_.shape[0])
-    n_samples = len(model.labels_)
-    for i, merge in enumerate(model.children_):
-        current_count = 0
-        for child_idx in merge:
-            if child_idx < n_samples:
-                current_count += 1  # Leaf node
-            else:
-                current_count += counts[child_idx - n_samples]
-        counts[i] = current_count
-
-    linkage_matrix = np.column_stack([model.children_, model.distances_, counts]).astype(float)
-
-    # Plot the dendrogram
-    plt.figure(figsize=(15, 10))
-    dendrogram(linkage_matrix, truncate_mode=truncate_mode, p=p, leaf_rotation=leaf_rotation, leaf_font_size=leaf_font_size, show_contracted=True)
-
-    # Annotating the number of points in each cluster
-    plt.title('Hierarchical Clustering Dendrogram')
-    plt.xlabel('Index of point or cluster')
-    plt.ylabel('Distance')
-
-    if save_path:
-        plt.savefig(save_path)
-
-
 def visualize_encoding_ADSB(encodings, traj, split_ind, path, idx):
 
     if not os.path.exists(os.path.join(f'figures/{path}/encoding')):
@@ -267,9 +228,6 @@ def calculate_NMI_ARI(clus_model, to_be_fit, filename, true_label=None):
     mi = []
     min_cluster = len(np.unique(true_label))
     cluster_range = [min_cluster]
-
-    #cluster_range = [16, 18, 20, 22, 196, 198, 200] # for rapid testing
-    #cluster_range = np.arange(min_cluster, 202)[::2]
     for n_cluster in cluster_range:
         clus_model.n_clusters = n_cluster
         clus_model.fit(to_be_fit)
@@ -282,27 +240,6 @@ def calculate_NMI_ARI(clus_model, to_be_fit, filename, true_label=None):
         nmi.append(nmi_score)
         ari.append(ari_score)
         mi.append(mi_score)
-
-    """# Plot versus number of clusters
-    fig, ax = plt.subplots(3, 1, figsize=(10, 15))
-
-    ax[0].plot(cluster_range, nmi)
-    ax[0].set_xlabel('Number of clusters')
-    ax[0].set_ylabel('NMI score')
-    ax[0].set_title('NMI scores for varying number of clusters')
-
-    ax[1].plot(cluster_range, ari)
-    ax[1].set_xlabel('Number of clusters')
-    ax[1].set_ylabel('ARI score')
-    ax[1].set_title('ARI for varying number of clusters')
-
-    ax[2].plot(cluster_range, mi)
-    ax[2].set_xlabel('Number of clusters')
-    ax[2].set_ylabel('MI score')
-    ax[2].set_title('MI for varying number of clusters')
-
-    plt.tight_layout()
-    plt.savefig(filename)"""
 
     # Write txt report, change path name
     with open(filename.with_suffix('.txt'), "w") as f:
