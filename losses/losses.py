@@ -4,9 +4,34 @@ import torch.nn.functional as F
 from .utils import *
 import gc
 
-criterion = torch.nn.CrossEntropyLoss()
+# ATSCC loss
+def soft_nearest_neighbor_loss(x, y, T):
 
-# TS2Vec loss
+    sim = torch.mm(x, x.t()) / T # Calculate the similarity matrix and scale by temperature
+    sim.fill_diagonal_(0) # Remove self-similarity
+    masks = torch.eq(y[:, None], y[None, :]).bool() # Create a mask for instances with the same label
+
+    numerator = torch.logsumexp(sim * masks, dim=1) # Positive instances
+    denominator = torch.logsumexp(sim, dim=1) #* ~masks # Negative instances
+    loss = torch.mean(denominator - numerator) # If loss is negative, it means that the positive instances are closer than the negative instances
+
+    return loss
+
+def flat_snnl(out1, proc_label, temperature=100.0, portion=0.2):
+    valid_indices = ~proc_label.reshape(-1).isnan()
+
+    out1 = out1.reshape(-1, out1.shape[-1])[valid_indices]
+    proc_label = flatten_local_label(proc_label)
+
+    sample_size = int(len(out1) * portion)
+    indices = torch.randperm(len(out1))[:sample_size]
+    out1 = out1[indices]
+    proc_label = proc_label[indices]
+    proc_label = proc_label.long()
+
+    return soft_nearest_neighbor_loss(out1, proc_label, temperature)
+
+"""# TS2Vec loss
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=0):
     loss = torch.tensor(0., device=z1.device)
     d = 0
@@ -234,8 +259,32 @@ def InfoNCE(z1, z2, temperature=1.0):
     logits = -F.log_softmax(logits, dim=-1)
     loss = logits[:,0].mean()
 
-    return loss
+    return loss"""
+# Unused functions
+# criterion = torch.nn.CrossEntropyLoss()
+"""
+def layer_wise_snnl(z, proc_label, temperature=100.0, portion=0.2):
 
+    valid_indices = ~proc_label.reshape(-1).isnan()
+    proc_label = flatten_local_label(proc_label)
+    z = [z_i.reshape(-1, z_i.shape[-1])[valid_indices] for z_i in z]
+
+    sample_size = int(len(z[0]) * portion)
+    indices = [torch.randperm(len(z_i))[:sample_size] for z_i in z]
+    z = [z_i[idx] for z_i, idx in zip(z, indices)]
+
+    return sum([soft_nearest_neighbor_loss(z_i, proc_label[idx], temperature) for z_i, idx in zip(z, indices)]) / len(z)
+
+def soft_gaussian_neighborhood_loss(z, proc_label, temperature=100.0):
+
+    valid_indices = ~proc_label.reshape(-1).isnan()
+    z = z.reshape(-1, z.shape[-1])[valid_indices]
+    proc_label = flatten_local_label(proc_label)
+
+    return soft_nearest_neighbor_gaussian_loss(z, proc_label, temperature, min2sigma=20.0)
+"""
+
+"""
 def hierarchical_snnl(z1, z2, loc_label1, loc_label2, alpha=0.5, temperature=10.0, temporal_unit=0):
     loss = torch.tensor(0., device=z1.device)
     d = 0
@@ -265,20 +314,9 @@ def hierarchical_snnl(z1, z2, loc_label1, loc_label2, alpha=0.5, temperature=10.
             loss += alpha * instance_contrastive_loss(z1, z2)
         d += 1
     return loss / d
+"""
 
-def soft_nearest_neighbor_loss(x, y, T):
-
-    sim = torch.mm(x, x.t()) / T # Calculate the similarity matrix and scale by temperature
-    sim.fill_diagonal_(0) # Remove self-similarity
-    masks = torch.eq(y[:, None], y[None, :]).bool() # Create a mask for instances with the same label
-
-    numerator = torch.logsumexp(sim * masks, dim=1) # Positive instances
-    denominator = torch.logsumexp(sim, dim=1) #* ~masks # Negative instances
-    loss = torch.mean(denominator - numerator) # If loss is negative, it means that the positive instances are closer than the negative instances
-
-    return loss
-
-def soft_nearest_neighbor_loss_loop(x, y, T):
+"""def soft_nearest_neighbor_loss_loop(x, y, T):
     loss = 0.0
     n_samples = x.shape[0]
 
@@ -318,9 +356,9 @@ def soft_nearest_neighbor_gaussian_loss(x, y, T, min2sigma=20.0):
 
     loss = torch.mean(denominator - numerator)
 
-    return loss
+    return loss"""
 
-def batch_soft_nearest_neighbor_loss(out1, proc_label, temperature=100.0):
+"""def batch_soft_nearest_neighbor_loss(out1, proc_label, temperature=100.0):
     local_loss = []
     for x_local, y_local in zip(out1, proc_label):
         # Filter out valid indices (non-NaN)
@@ -339,46 +377,12 @@ def batch_soft_nearest_neighbor_loss(out1, proc_label, temperature=100.0):
     else:
         local_loss = torch.tensor(0.0)  # Return zero if there are no valid subsets
 
-    return local_loss
+    return local_loss"""
 
-def wrapup_local_snnl(z1, z2, proc_label1, proc_label2, temperature=100.0):
+"""def wrapup_local_snnl(z1, z2, proc_label1, proc_label2, temperature=100.0):
     # Concatenate z1 and z2, proc_label1 and proc_label2 along time dimension
     z = torch.cat((z1, z2), dim=1)
     proc_label = torch.cat((proc_label1, proc_label2), dim=1)
-    return batch_soft_nearest_neighbor_loss(z, proc_label, temperature=temperature)
-
-def flat_snnl(out1, proc_label, temperature=100.0, portion=0.2):
-    valid_indices = ~proc_label.reshape(-1).isnan()
-
-    out1 = out1.reshape(-1, out1.shape[-1])[valid_indices]
-    proc_label = flatten_local_label(proc_label)
-
-    sample_size = int(len(out1) * portion)
-    indices = torch.randperm(len(out1))[:sample_size]
-    out1 = out1[indices]
-    proc_label = proc_label[indices]
-    proc_label = proc_label.long()
-
-    return soft_nearest_neighbor_loss(out1, proc_label, temperature)
-
-def layer_wise_snnl(z, proc_label, temperature=100.0, portion=0.2):
-
-    valid_indices = ~proc_label.reshape(-1).isnan()
-    proc_label = flatten_local_label(proc_label)
-    z = [z_i.reshape(-1, z_i.shape[-1])[valid_indices] for z_i in z]
-
-    sample_size = int(len(z[0]) * portion)
-    indices = [torch.randperm(len(z_i))[:sample_size] for z_i in z]
-    z = [z_i[idx] for z_i, idx in zip(z, indices)]
-
-    return sum([soft_nearest_neighbor_loss(z_i, proc_label[idx], temperature) for z_i, idx in zip(z, indices)]) / len(z)
-
-def soft_gaussian_neighborhood_loss(z, proc_label, temperature=100.0):
-
-    valid_indices = ~proc_label.reshape(-1).isnan()
-    z = z.reshape(-1, z.shape[-1])[valid_indices]
-    proc_label = flatten_local_label(proc_label)
-
-    return soft_nearest_neighbor_gaussian_loss(z, proc_label, temperature, min2sigma=20.0)
+    return batch_soft_nearest_neighbor_loss(z, proc_label, temperature=temperature)"""
 
 
