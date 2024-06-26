@@ -59,17 +59,7 @@ def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.0
 
 
 def apply_pooling(out, proc_label, pooling='mean'):
-    """
-    Apply specified pooling strategy to extract representations from a tensor.
-
-    Parameters:
-    - out: Tensor of shape [batch_size, seq_len, features], output from a model.
-    - proc_label: Tensor of shape [batch_size, seq_len], used to identify valid indices (non-NaN).
-    - pooling: String, specifies the pooling strategy ('max', 'last', 'first', 'mean').
-
-    Returns:
-    - cls: Tensor of pooled representations.
-    """
+    
     cls = []
     for i in range(out.size(0)):
         valid_indices = ~proc_label[i].isnan()
