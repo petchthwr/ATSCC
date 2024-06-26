@@ -1,1 +1,1 @@
-# Aircraft Trajectory Segmentation-based Contrastive Coding
+# ATSCC: Aircraft Trajectory Segmentation-based Contrastive Coding
