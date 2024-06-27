@@ -6,7 +6,7 @@ ATSCC is a self-supervised time series representation for multivariate aircraft 
 
 ## Requirements
 
-The recommended requirements for TS2Vec are specified as follows:
+The recommended requirements for ATSCC are listed as follows:
 * libopenvino-pytorch-frontend=2024.0.0
 * matplotlib=3.8.2
 * matplotlib-base=3.8.3
@@ -23,7 +23,7 @@ The recommended requirements for TS2Vec are specified as follows:
 * tsaug=0.2.1
 * umap-learn=0.5.4
 * wandb=0.16.4
-* 
+
 The dependencies can be installed by:
 ```bash
 pip install -r requirements.txt
