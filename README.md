@@ -29,6 +29,13 @@ The dependencies can be installed by:
 pip install -r requirements.txt
 ```
 
+## Dataset
+The code implementation utilizes the ATFMTraj data accessible via [ATFMTraj](https://huggingface.co/datasets/petchthwr/ATFMTraj). The dataset comprises 3 airports, totaling 4 datasets.
+-**Incheon International Airport (RKSI)**: Data from 2018 to 2023 were obtained from the Opensky database, focusing on flights identified via Airportal schedules. The arrival and departure datasets are labeled RKSIa and RKSId, respectively.
+-**Stockholm Arlanda Airport (ESSA)**: This implementation utilizes data from the Swedish Civil Air Traffic Control (SCAT) dataset, which includes surveillance, weather, and flight plans. It primarily examines arrival data.
+- **Zurich Airport (LSZH)**: The analysis focuses on arrival flight trajectories using a dataset referenced in the study, emphasizing the evaluation of this data for our experiments.
+
+
 ## Example
 
 ```python
