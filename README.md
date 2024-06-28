@@ -29,6 +29,50 @@ The dependencies can be installed by:
 pip install -r requirements.txt
 ```
 
+## Example
+
+```python
+from atscc import *
+from model.GPT import TSGPTEncoder
+from sklearn.cluster import KMeans
+from ATFMTraj import load_ATFM
+
+device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+
+train_data, train_labels = load_ATFM('RKSIa_v', 'TRAIN', path_to_data)
+test_data, test_labels = load_ATFM('RKSIa_v', 'TEST', path_to_data)
+
+train_loader, test_loader = load_data(dataset='RKSIa_v',
+                                      split_point='auto',
+                                      downsample=5,
+                                      size_lim=None,
+                                      rdp_epsilon=0.1,
+                                      batch_size=16,
+                                      device=device,
+                                      polar=True,
+                                      direction=True,
+                                      x = (train_data, train_labels, test_data, test_labels))
+
+Encoder = TSGPTEncoder(input_dims=9,
+                       output_dims=320,
+                       embed_dim=768,
+                       num_heads=12,
+                       num_layers=12,
+                       hidden_dim=3072,
+                       dropout=0.35).to(device)
+
+loss_log, score_log = fit(Encoder, train_loader, test_loader,
+                          optim=torch.optim.AdamW(Encoder.parameters(), lr=1e-5, weight_decay=1e-5),
+                          scheduler=None,
+                          num_epochs=10,
+                          max_iter=500000,
+                          eval_every=5,
+                          local_temp=5.0,
+                          device=device,
+                          data='RKSIa_v',
+                          clus_model=KMeans(n_clusters=2))
+```
+
 ## Example embedding
 
 ![Screenshot](embedding.png)
