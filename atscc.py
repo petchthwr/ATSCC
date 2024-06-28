@@ -44,10 +44,13 @@ def data_to_path(data):
     else:
         raise ValueError('Invalid data')
 
-def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False, shuffle=True):
+def load_data(dataset, split_point, downsample=2, size_lim=None, rdp_epsilon=0.005, batch_size=32, device='cuda:1', direction=False, polar=False, shuffle=True, x=None):
 
-    datapath = data_to_path(dataset)
-    x_train, x_test, y_train, y_test = load_ATFM_data(datapath, split_point, downsample=downsample, size_lim=size_lim)
+    if x is not None:
+        x_train, x_test, y_train, y_test = x
+    else:
+        datapath = data_to_path(dataset)
+        x_train, x_test, y_train, y_test = load_ATFM_data(datapath, split_point, downsample=downsample, size_lim=size_lim)
 
     train_dataset = ATPCCDataset(x_train, y_train, rdp_epsilon, False, device, direction=direction, polar=polar)
     test_dataset = ATPCCDataset(x_test, y_test, rdp_epsilon, True, device, direction=direction, polar=polar, fitted_scaler=train_dataset.scaler)
