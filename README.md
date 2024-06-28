@@ -83,5 +83,3 @@ loss_log, score_log = fit(Encoder, train_loader, test_loader,
 ## Example embedding
 
 ![Screenshot](embedding.png)
-
-## Reference
