@@ -83,3 +83,20 @@ loss_log, score_log = fit(Encoder, train_loader, test_loader,
 ## Example embedding
 
 ![Screenshot](embedding.png)
+
+## Citation
+```bibtex
+@dataset{ATFMTraj2024,
+  title={ATFMTraj: Aircraft Trajectory Classification Data for Air Traffic Management},
+  author={Phisannupawong, Thaweerath and Damanik, Joshua Julian and Choi, Han-Lim},
+  year={2024},
+  note={https://huggingface.co/datasets/petchthwr/ATFMTraj}
+}
+
+@misc{ATSCC2024,
+  title={Aircraft Trajectory Segmentation-based Contrastive Coding: A Framework for Self-supervised Trajectory Representation},
+  author={Phisannupawong, Thaweewrath and Damanik, Joshua J. and Choi, Han-Lim},
+  year={2024},
+  note={Preprint submitted for publication}
+}
+```
