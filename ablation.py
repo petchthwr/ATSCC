@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
 
 # Variable for wandb logging
-wandb.login(key='dd48a2fe503f34d4c795ab3877f4fb93132843e1')
+wandb.login(key=''your_wandb_login_token'')
 
 split_point = 'auto'
 direction = False
